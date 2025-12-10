@@ -314,16 +314,21 @@ class PPORolloutBuffer(BaseBuffer):
         else:
             self.prepare_data(train_int_rew_flag)
 
-        if batch_size is None:
-            batch_size = self.buffer_size * self.n_envs
+        # Total number of samples in the rollout
+        total_samples = self.buffer_size * self.n_envs
 
-        indices = np.random.permutation(self.buffer_size * self.n_envs)
+        if batch_size is None:
+            batch_size = total_samples
+
+        indices = np.random.permutation(total_samples)
 
         start_idx = 0
         end_idx = batch_size * self.n_envs
         if not train_int_rew_flag and self.first_update:
             end_idx = (self.buffer_size//2) * self.n_envs
             self.first_update = False
+        else:
+            end_idx = total_samples
 
         while start_idx < end_idx:
             yield self._get_samples(indices[start_idx : start_idx + batch_size])
