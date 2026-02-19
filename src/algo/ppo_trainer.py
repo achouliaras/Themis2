@@ -12,7 +12,7 @@ from src.utils.enum_types import ModelType
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import explained_variance, get_schedule_fn
+from stable_baselines3.common.utils import FloatSchedule, explained_variance
 
 from torch.nn import functional as F
 
@@ -160,11 +160,11 @@ class PPOTrainer(PPORollout):
     def _setup_model(self) -> None:
         super(PPOTrainer, self)._setup_model()
         # Initialize schedules for policy/value clipping
-        self.clip_range = get_schedule_fn(self.clip_range)
+        self.clip_range = FloatSchedule(self.clip_range)
         if self.clip_range_vf is not None:
             if isinstance(self.clip_range_vf, (float, int)):
                 assert self.clip_range_vf > 0, "`clip_range_vf` must be positive or `None`"
-            self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
+            self.clip_range_vf = FloatSchedule(self.clip_range_vf)
 
     def train_policy_and_models(self, clip_range, clip_range_vf, model_to_train="Both") -> Tensor:
         loss = None
@@ -349,4 +349,7 @@ class PPOTrainer(PPORollout):
 
     def save(self, path: str) -> None:
         super(PPOTrainer, self).save(path, include=["run_id"])
+
+    def load(self, path: str, device: th.device) -> None:
+        super(PPOTrainer, self).load(path, device=device)
     

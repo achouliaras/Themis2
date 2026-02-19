@@ -4,11 +4,12 @@ import numpy as np
 import torch as th
 import wandb
 from torch import nn
+import gymnasium as gym
 from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, ReseedWrapper
 # from procgen import ProcgenEnv
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecMonitor
+from stable_baselines3.common.vec_env import VecMonitor, DummyVecEnv, VecTransposeImage
 from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
 from datetime import datetime
 
@@ -95,6 +96,50 @@ class TrainingConfig():
                 wrapper_class = lambda x: ImgObsWrapper(ReseedWrapper(x, seeds=_seeds))
             return wrapper_class
         return None
+
+    def get_env(self, wrapper_class=None, num_processes=1, seed=None):
+        if self.env_source == EnvSrc.MiniGrid:
+            env = make_vec_env(
+                self.env_name,
+                wrapper_class=wrapper_class,
+                vec_env_cls=DummyVecEnv,
+                n_envs=num_processes,
+                monitor_dir=None,
+                seed=seed if seed is not None else self.run_id,
+            )
+            env = VecTransposeImage(env)
+            
+        elif self.env_source == EnvSrc.ProcGen:
+            # Procgen is natively vectorized; we just force it to 1 environment
+            env = ProcgenEnv(
+                num_envs=1,
+                env_name=self.env_name,
+                rand_seed= seed if seed is not None else self.run_id,
+                num_threads=1, # Reduced threads for a single env
+                distribution_mode=self.procgen_mode,
+            )
+            # We keep VecMonitor because Procgen outputs are specific
+            env = VecMonitor(venv=env)
+        else:
+            raise NotImplementedError
+
+        # Video recording for single environments usually uses gym.wrappers.RecordVideo
+        # instead of VecVideoRecorder
+        if (self.record_video == 2) or \
+                (self.record_video == 1 and self.run_id == 0):
+            video_path = os.path.join(self.log_dir, 'videos')
+            _trigger = lambda x: x > 0 and x % (self.n_steps * self.rec_interval) == 0
+            
+            # If it's Procgen, it's technically still a 'VecEnv' of size 1
+            if self.env_source == EnvSrc.ProcGen:
+                env = VecVideoRecorder( env, video_path, record_video_trigger=_trigger, video_length=self.video_length)
+            else:
+                # For standard MiniGrid/Gym
+                env = gym.wrappers.RecordVideo(
+                    env, video_path, episode_trigger=_trigger, video_length=self.video_length
+                )
+                
+        return env
 
     def get_venv(self, wrapper_class=None):
         if self.env_source == EnvSrc.MiniGrid:

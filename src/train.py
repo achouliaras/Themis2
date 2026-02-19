@@ -141,7 +141,7 @@ def train(config):
             model.learn(total_timesteps=pretrain_steps, callback=callbacks)
             model.save(path=config.log_dir+'/pretrain_model')
     model.train_mode()
-    if config.reward_learning_frequency>0:
+    if config.reward_learning_frequency != 0:
         
         rew_policy_kwargs = dict(
             activation_fn=activation_fn,
@@ -197,7 +197,7 @@ def train(config):
         )
         # TODO: GET DATA FROM FILES
         r_model.learn(episode_num=config.episode_num, init = True)
-        r_model.rew_policy.save(path=config.log_dir+'/reward_model_'+str(train_steps))
+        r_model.policy.save(path=config.log_dir+'/reward_model_step_'+str(train_steps))
         model.learn(total_timesteps=train_steps, callback=callbacks)
         model.save(path=config.log_dir+'/train_model_'+str(train_steps))
     else:

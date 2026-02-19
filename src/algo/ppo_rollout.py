@@ -844,4 +844,16 @@ class PPORollout(BaseAlgorithm):
         return self
 
     def save(self, save_path: str, include: Optional[Iterable[str]] = None) -> None:
-        super().save(save_path, include=include)
+        super().save(save_path, include=include, exclude=["episodic_obs_emb_history", "episodic_trj_emb_history"])
+
+    def load(self, load_path: str, device: th.device, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None) -> None:
+        def float_zeros(tensor_shape):
+            return th.zeros(tensor_shape, device=self.device, dtype=th.float32)
+        
+        custom_objects = {
+            "episodic_obs_emb_history": None,
+            "episodic_trj_emb_history": None,
+            "_last_policy_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_policy_features]),
+            "_last_model_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_model_features]),
+        }
+        super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)
