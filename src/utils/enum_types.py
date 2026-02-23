@@ -115,3 +115,41 @@ class EnvSrc(Enum):
             if env_src == 'atari':
                 return EnvSrc.Atari
         raise ValueError
+
+class SamplingStrategy(Enum):
+    Uniform = 0
+    SwissTournament = 1
+    SwissInfoGain = 2
+    BordaCopeland = 3 # Round-Robin
+
+    @staticmethod
+    def get_enum_sampling_strategy(sampling_strategy):
+        if isinstance(sampling_strategy, SamplingStrategy):
+            return sampling_strategy
+        if isinstance(sampling_strategy, str):
+            sampling_strategy = sampling_strategy.strip().lower()
+            if sampling_strategy == 'uniform':
+                return SamplingStrategy.Uniform
+            if sampling_strategy == 'swiss_tournament':
+                return SamplingStrategy.SwissTournament
+            if sampling_strategy == 'swiss_info_gain':
+                return SamplingStrategy.SwissInfoGain
+            if sampling_strategy == 'borda_copeland':
+                return SamplingStrategy.BordaCopeland
+        raise ValueError
+
+class VideoProcessingMode(Enum):
+    SideBySide = 0
+    TopBottom = 1
+
+    @staticmethod
+    def get_enum_video_processing_mode(mode):
+        if isinstance(mode, VideoProcessingMode):
+            return mode
+        if isinstance(mode, str):
+            mode = mode.strip().lower()
+            if mode == 'sidebyside':
+                return VideoProcessingMode.SideBySide
+            if mode == 'topbottom':
+                return VideoProcessingMode.TopBottom
+        raise ValueError
