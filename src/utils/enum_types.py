@@ -132,7 +132,7 @@ class SamplingStrategy(Enum):
                 return SamplingStrategy.Uniform
             if sampling_strategy == 'swiss_tournament':
                 return SamplingStrategy.SwissTournament
-            if sampling_strategy == 'swiss_info_gain':
+            if sampling_strategy in ['swiss_info_gain', 'swiss_infogain', 'swissinfogain']:
                 return SamplingStrategy.SwissInfoGain
             if sampling_strategy == 'borda_copeland':
                 return SamplingStrategy.BordaCopeland

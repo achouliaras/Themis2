@@ -251,7 +251,7 @@ class PreferenceBuffer(BaseBuffer):
 
         self.episode_index_dict = getattr(self, "episode_index_dict", {})
         next_id = getattr(self, "next_episode_id", 0)
-        new_episodes = 0
+        new_episodes = []
 
         # Vectorized matching: first done after each start
         for env_idx, starts_env, dones_env in zip(env_ids_unique, env_start_splits, env_done_splits):
@@ -271,7 +271,7 @@ class PreferenceBuffer(BaseBuffer):
                     "end": int(e_idx) + 1,
                 }
                 next_id += 1
-                new_episodes += 1
+                new_episodes.append(next_id - 1)
 
         self.next_episode_id = next_id
         
@@ -374,6 +374,7 @@ class PreferenceBuffer(BaseBuffer):
         if self.synthetic_teacher:
             # --- Generate synthetic preferences only for unlabeled pairs ---
             pair_mask, pair_labels = self._generate_synthetic_preferences(pair_ids, r_t_1, r_t_2, mask1, mask2, labels, teacher, debug=debug)
+            # TODO: if using iterative pairing algorithm like swiss tournament we need to generate more samples and label them here
         
         labels[pair_mask] = pair_labels
         # --- Convert all to tensors on device ---
