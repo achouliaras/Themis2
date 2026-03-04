@@ -121,6 +121,7 @@ class SamplingStrategy(Enum):
     SwissTournament = 1
     SwissInfoGain = 2
     BordaCopeland = 3 # Round-Robin
+    TrueSkill = 4
 
     @staticmethod
     def get_enum_sampling_strategy(sampling_strategy):
@@ -136,6 +137,8 @@ class SamplingStrategy(Enum):
                 return SamplingStrategy.SwissInfoGain
             if sampling_strategy == 'borda_copeland':
                 return SamplingStrategy.BordaCopeland
+            if sampling_strategy in ['trueskill', 'true_skill']:
+                return SamplingStrategy.TrueSkill
         raise ValueError
 
 class VideoProcessingMode(Enum):

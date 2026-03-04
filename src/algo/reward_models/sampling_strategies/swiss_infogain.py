@@ -1,32 +1,8 @@
 import math
-import tempfile
-import networkx as nx
 import numpy as np
 import pandas as pd
-import json
-import os
+from src.algo.reward_models.sampling_strategies.utils import load_json, safe_write_json, evaluate_ranking_accuracy
 
-def load_json(path):
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return {}
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        print("JSON file is corrupted or invalid.")
-        return {}
-    except Exception as e:
-        print(f"Unexpected error while loading JSON: {e}")
-        return {}
-
-def safe_write_json(path, data):
-    dir_name = os.path.dirname(path) or "."
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_name) as tmp:
-        json.dump(data, tmp, indent=4)
-        temp_name = tmp.name
-    os.replace(temp_name, path)  # atomic on most systems
-    
 class SwissInfoGainSampling:
     def __init__(self, traj_ids: np.ndarray, new_episodes: np.ndarray, **kwargs):
         # The global pool of all videos
@@ -40,7 +16,7 @@ class SwissInfoGainSampling:
         self.base_elo = 1000
         self.base_K = 40
         self.min_K = self.base_K / 8
-        self.max_rounds = kwargs.get("max_rounds", 30)
+        self.max_rounds = kwargs.get("max_rounds", len(self.traj_ids))
         self.discarded_pairs = set() # Track pairs that have been played enough times to exclude from future pairing
 
     def _expected_score(self, rating_a, rating_b):
@@ -132,50 +108,71 @@ class SwissInfoGainSampling:
                     # Formula: R_new = R_frozen + K * Sum(Actual - Expected)
                     for p in played_this_round:
                         # Decay K as more games are played to stabilize ratings over time
-                        K = self.base_K / (1 + self.games_played[p] / 10)
+                        # K = self.base_K / (1 + self.games_played[p] / 10)
 
-                        # decay_factor = math.sqrt(1 + self.games_played[p] / 5)
-                        # K = max(self.min_K, self.base_K / decay_factor)
+                        decay_factor = math.sqrt(1 + self.games_played[p] / 5)
+                        K = max(self.min_K, self.base_K / decay_factor)
 
                         self.ratings[p] = frozen_ratings[p] + K * (actual_scores[p] - expected_scores[p])
 
         except FileNotFoundError:
             raise FileNotFoundError(f"Preferences CSV not found at path: {self.preferences_csv}. Ensure that matches are being recorded correctly.")
 
-    def pair_by_info_gain(self, players, new_players, ratings, discarded_pairs):
+    def pair_by_info_gain(self, players, ratings, discarded_pairs):
         """
-        Pair players by maximizing information gain proxy.
-        Avoids duplicate matches.
+        Organically pairs items by discounting Elo differences based on uncertainty.
+        Naturally shifts from New vs. New to New vs. Old as items stabilize.
         """
-
-        # Candidate edges (all interesting pairs not played before)
+        import math
         candidates = []
+        
+        # A tuning parameter. Higher means we forgive larger Elo gaps for uncertain items.
+        # 400 is standard for Elo math (1 standard deviation in Elo terms)
+        UNCERTAINTY_SCALE = 400.0 
+        
         for i in range(len(players)):
             for j in range(i+1, len(players)):
                 a, b = players[i], players[j]
+                
+                # Only skip if they have ACTUALLY played each other
                 if (a, b) in discarded_pairs or (b, a) in discarded_pairs:
                     continue
-                p_win = self._expected_score(ratings[a], ratings[b])
-                base_ig = p_win * (1 - p_win)# max info at ~0.5
-                var_a = 1.0 / (1e-6 + self.fisher_info.get(a, 0.0))
-                var_b = 1.0 / (1e-6 + self.fisher_info.get(b, 0.0))
+                
+                var_a = 1.0 / max(1e-6, self.fisher_info.get(a, 0.0))
+                var_b = 1.0 / max(1e-6, self.fisher_info.get(b, 0.0))
+                
+                # 1. Calculate the raw Elo difference
+                raw_diff = abs(ratings[a] - ratings[b])
+                
+                # 2. Calculate combined uncertainty (Standard Deviation)
+                uncertainty = math.sqrt(var_a + var_b)
+                
+                # 3. The Organic Forgiveness: Reduce the gap by the uncertainty
+                effective_diff = max(0.0, raw_diff - (uncertainty * UNCERTAINTY_SCALE))
+                
+                # 4. Calculate p_win using the EFFECTIVE difference
+                # (Assuming standard Elo base-10 formula)
+                effective_p_win = 1.0 / (1.0 + 10 ** (effective_diff / 400.0))
+                
+                # If uncertainty was high enough to erase the gap, base_ig stays maxed at 0.25!
+                base_ig = effective_p_win * (1.0 - effective_p_win)
+                
+                # Total IG still prioritizes high variance match-ups
                 ig = base_ig * (var_a + var_b)
+                
                 candidates.append((ig, a, b))
+
         if not candidates:
             return [], discarded_pairs
         
-        # Sort by descending information gain
         candidates.sort(reverse=True, key=lambda x: x[0])
-        # Select pairs greedily (drop 10% of worst pairs)
-        if self.round_number > 15:  # Only discard after round 4 to ensure we have enough data
-            top_n = int(len(candidates) * 0.90)
-            accepted_candidates = candidates[:top_n]
-            discarded_candidates = candidates[top_n:]
-            for _, a, b in discarded_candidates:
-                discarded_pairs.add((a, b))
-        else:            
+        
+        # TEMPORARY pruning. Do not permanently add these to discarded_pairs.
+        info_threshold = 0.05
+        if self.round_number >= self.max_rounds // 2:
+            accepted_candidates = [c for c in candidates if c[0] >= info_threshold]
+        else:
             accepted_candidates = candidates
-            discarded_candidates = []
 
         paired = set()
         pairs = []
@@ -184,7 +181,65 @@ class SwissInfoGainSampling:
                 pairs.append(tuple(sorted((a, b))))
                 paired.add(a)
                 paired.add(b)
+
+        # ONLY permanently discard pairs that actually fought this round
+        for pair in pairs:
+            discarded_pairs.add(pair)
+
         return pairs, discarded_pairs
+    
+    # def pair_by_info_gain(self, players, ratings, discarded_pairs):
+    #     """
+    #     Pair players by maximizing information gain proxy.
+    #     Avoids duplicate matches.
+    #     Assumes:
+    #     - New players start with base Elo (1000) and 0 games played
+    #     - discarded_pairs resets every iteration
+    #     """
+    #     # Candidate edges (all pairs not played before)
+    #     candidates = []
+    #     for i in range(len(players)):
+    #         for j in range(i+1, len(players)):
+    #             a, b = players[i], players[j]
+    #             if (a, b) in discarded_pairs or (b, a) in discarded_pairs:
+    #                 continue
+    #             p_win = self._expected_score(ratings[a], ratings[b])
+    #             base_ig = p_win * (1 - p_win)# max info at ~0.5
+    #             var_a = 1.0 / max(1e-6, self.fisher_info.get(a, 0.0))
+    #             var_b = 1.0 / max(1e-6, self.fisher_info.get(b, 0.0))
+    #             ig = base_ig * (var_a + var_b) # weighted by uncertainty
+    #             # w_a = 1.0 / (1+ self.games_played.get(a, 0))
+    #             # w_b = 1.0 / (1+ self.games_played.get(b, 0))
+    #             # ig = base_ig * (w_a + w_b) # weighted by uncertainty
+    #             candidates.append((ig, a, b))
+    #     if not candidates:
+    #         return [], discarded_pairs
+        
+    #     # Sort by descending information gain
+    #     info_threshold = 0.05
+    #     candidates.sort(reverse=True, key=lambda x: x[0])
+    #     # Select pairs greedily (drop 10% of worst pairs)
+    #     accepted_candidates = candidates
+    #     if self.round_number >= self.max_rounds // 2:  # Only discard after half rounds to ensure we have enough data
+    #         accepted_candidates = [c for c in candidates if c[0] >= info_threshold]
+    #         discarded_candidates = [c for c in candidates if c[0] < info_threshold]
+    #         for _, a, b in discarded_candidates:
+    #             discarded_pairs.add((a, b))
+
+    #     paired = set()
+    #     pairs = []
+    #     for _, a, b in accepted_candidates:
+    #         if a not in paired and b not in paired:
+    #             pairs.append(tuple(sorted((a, b))))
+    #             paired.add(a)
+    #             paired.add(b)
+
+    #     # This also discards the pairs that were actually selected, 
+    #     # allowing others to be reconsidered in future rounds if they become more informative.
+    #     for pair in pairs:
+    #         discarded_pairs.add(pair)
+
+    #     return pairs, discarded_pairs
 
     def get_next_pairs(self, traj_ids: list, new_episodes: list, *args, **kwargs) -> np.ndarray:
         """
@@ -203,17 +258,17 @@ class SwissInfoGainSampling:
         # Debug print sorted ratings
         d_view = [(v, k) for k, v in self.ratings.items() if k in traj_ids]
         d_view.sort(reverse=True)
-        for rating, tid in d_view:
-            print(f"  Traj ID {tid}: Elo {rating:.1f}")
+        # for rating, tid in d_view:
+        #     print(f"  Traj ID {tid}: Elo {rating:.1f}")
 
-        self.evaluate_ranking_accuracy([tid for _, tid in d_view])
+        evaluate_ranking_accuracy([tid for _, tid in d_view])
 
         # 2. Stop condition
         if self.round_number >= self.max_rounds:
             print("Swiss InfoGain: Max rounds reached.")
             return np.empty((0, 2), dtype=int)
 
-        pairs, self.discarded_pairs = self.pair_by_info_gain(traj_ids, new_episodes, self.ratings, self.discarded_pairs)
+        pairs, self.discarded_pairs = self.pair_by_info_gain(traj_ids, self.ratings, self.discarded_pairs)
 
         if not pairs:  # no valid pairs left to play
             print("Swiss InfoGain: No more possible pairs.")
@@ -223,29 +278,7 @@ class SwissInfoGainSampling:
             "round_number": self.round_number,
         }
         safe_write_json(self.sampler_state_json, self.state_data)
+        pairs.sort(key=lambda x: x[0])  # Sort by first element for consistency (not strictly necessary)
         pairs = np.asarray(pairs, dtype=int)
         print(f"Swiss InfoGain Round {self.round_number}: Generated {len(pairs)} pairs.")
         return pairs
-    
-    def evaluate_ranking_accuracy(self, est_sorted_ids):
-        # True order is sorted by trajectory ID
-        true_order = sorted(est_sorted_ids)
-        n = len(est_sorted_ids)
-
-        # Create position maps
-        true_rank = {tid: i for i, tid in enumerate(true_order)}
-
-        correct = 0
-        total = 0
-
-        for i in range(n):
-            for j in range(i+1, n):
-                a = est_sorted_ids[i]
-                b = est_sorted_ids[j]
-
-                if true_rank[a] < true_rank[b]:
-                    correct += 1
-                total += 1
-
-        pairwise_accuracy = 100 * correct / total if total > 0 else 0
-        print(f"Pairwise ranking accuracy: {pairwise_accuracy:.2f}%")
