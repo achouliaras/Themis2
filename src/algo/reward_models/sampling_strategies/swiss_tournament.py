@@ -72,11 +72,11 @@ class SwissInfoGainSampling:
                     label = row['label']
 
                     if p1 in frozen_ratings and p2 in frozen_ratings:
-                        if label == 'left':
+                        if label == 'Left':
                             s1, s2 = 1.0, 0.0
-                        elif label == 'right':
+                        elif label == 'Right':
                             s1, s2 = 0.0, 1.0
-                        elif label == 'draw':
+                        elif label == 'Equal':
                             s1, s2 = 0.5, 0.5
                         else:
                             continue

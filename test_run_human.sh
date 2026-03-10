@@ -6,11 +6,11 @@ pretrain_percentage=0.2
 pretraining_num_processes=8
 # reward learning
 reward_learning_frequency=-1 # (-1 for human feedback)
-traj_gen_num_processes=1
 edit_videos_num_processes=8
-episode_num=64
+episode_num=5 # 100 for human feedback, 5 for testing
 pair_num=8
 exp_group_name="cgroup"
+notifications=True # Wether to send email notifications to annotators about new iterations and rounds (only relevant for human feedback setting)
 chunk_size=64
 fps=5
 # training
@@ -39,7 +39,7 @@ int_rew_coef=1e-2
 
 # PYTHONPATH=./ python3 src/generate_trajectories.py \
 #           --run_id=$seed \
-#           --num_processes=$traj_gen_num_processes \
+#           --num_processes=1 \
 #           --int_rew_source=$int_rew_source \
 #           --env_source=minigrid \
 #           --game_name=$env \
@@ -58,13 +58,15 @@ PYTHONPATH=./ python3 src/video_pipeline.py \
           --env_source=minigrid \
           --game_name=$env \
           --exp_group_name="cgroup" \
+          --notifications=$notifications \
           --pair_num=$pair_num \
           --int_rew_source=$int_rew_source \
-          --sampling_strategy="swiss_infogain" \
+          --sampling_strategy="trueskill" \
           --video_processing_mode="SideBySide" \
           --num_processes=$edit_videos_num_processes \
           --add_xai_videos=0 \
           --traj_overwrite=True \
+          --curr_iter=0 \
 
 
 

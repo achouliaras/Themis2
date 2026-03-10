@@ -44,11 +44,11 @@ class BordaCopelandSampling:
                 games_played[p2] += 1
 
                 # Update borda counts (Borda count = number of wins a video has)
-                if label == 'left':
+                if label == 'Left':
                     borda_counts[p1] += 1
-                elif label == 'right':
+                elif label == 'Right':
                     borda_counts[p2] += 1
-                elif label == 'draw':
+                elif label == 'Equal':
                     borda_counts[p1] += 0.5
                     borda_counts[p2] += 0.5
             

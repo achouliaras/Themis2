@@ -21,7 +21,6 @@ class TrueSkillSampling:
         # Dictionary to hold the ratings. 
         # Default is mu=25.0, sigma=8.333
         self.ratings = {}
-        
 
     def _get_rating(self, item_id):
         if item_id not in self.ratings:
@@ -30,22 +29,22 @@ class TrueSkillSampling:
     
     def _update_match(self, item_a_id, item_b_id, outcome):
         """
-        outcome: 'left' (A wins), 'right' (B wins), 'draw' (Draw)
+        outcome: 'Left' (A wins), 'Right' (B wins), 'Equal' (Draw)
         """
         rating_a = self._get_rating(item_a_id)
         rating_b = self._get_rating(item_b_id)
         
-        if outcome == 'left':
+        if outcome == 'Left':
             # A wins, B loses
             new_a, new_b = trueskill.rate_1vs1(rating_a, rating_b)
-        elif outcome == 'right':
+        elif outcome == 'Right':
             # B wins, A loses (Notice the order is swapped)
             new_b, new_a = trueskill.rate_1vs1(rating_b, rating_a)
-        elif outcome == 'draw':
+        elif outcome == 'Equal':
             # Draw! Both items converge.
             new_a, new_b = trueskill.rate_1vs1(rating_a, rating_b, drawn=True)
         else:
-            raise ValueError(f"Invalid outcome: {outcome}. Must be 'left', 'right', or 'draw'.")
+            raise ValueError(f"Invalid outcome: {outcome}. Must be 'Left', 'Right', or 'Equal'.")
             
         self.ratings[item_a_id] = new_a
         self.ratings[item_b_id] = new_b
@@ -81,7 +80,7 @@ class TrueSkillSampling:
             label_counts = df['label'].value_counts()
             total_matches = label_counts.sum()
             if total_matches > 0:
-                draw_count = label_counts.get('draw', 0)
+                draw_count = label_counts.get('Equal', 0)
                 draw_probability = draw_count / total_matches
                 self.ts_env = trueskill.TrueSkill(draw_probability=draw_probability)
             else:
@@ -146,7 +145,7 @@ class TrueSkillSampling:
         
         # Threshold: if quality drops below this, we are too confident to waste human labels
         # 0.10 means their distributions barely overlap anymore.
-        quality_threshold = 0.5 
+        quality_threshold = 0.05 
         
         if round_number >= max_rounds // 10:
             accepted_candidates = [c for c in candidates if c[0] >= quality_threshold]
@@ -183,10 +182,10 @@ class TrueSkillSampling:
         # Debug print sorted ratings
         d_view = [(v, k) for k, v in self.ratings.items() if k in traj_ids]
         d_view.sort(reverse=True)
-        # for rating, tid in d_view:
-        #     print(f"  Traj ID {tid}: TrueSkill {rating:.1f}")
+        for rating, tid in d_view:
+            print(f"  Traj ID {tid}: {rating}")
 
-        evaluate_ranking_accuracy([tid for _, tid in d_view])
+        # evaluate_ranking_accuracy([tid for _, tid in d_view])
 
         # 2. Stop condition
         if self.round_number >= self.max_rounds:

@@ -1,6 +1,5 @@
 import click
 import warnings
-
 # Suppress Pydantic v2 field attribute warnings from dependencies
 warnings.filterwarnings("ignore", message=".*attribute with value.*was provided to the.*Field.*function.*")
 import os, re, time
@@ -13,10 +12,11 @@ from moviepy import VideoFileClip, ColorClip, clips_array
 import logging
 logging.getLogger("imageio").setLevel(logging.ERROR)
 os.environ["IMAGEIO_FFMPEG_EXE_LOG_LEVEL"] = "error"
-
-from src.algo.reward_models.sampling_strategies import UniformSampling, BordaCopelandSampling, SwissInfoGainSampling
+from src.algo.reward_models.sampling_strategies import UniformSampling, BordaCopelandSampling, SwissInfoGainSampling, TrueSkillSampling
 from src.utils.configs import TrainingConfig
 from src.utils.enum_types import SamplingStrategy, VideoProcessingMode
+from src.utils.notifications import notify_new_round, notify_iteration_done, notify_new_iteration_started
+from src.utils.label_studio_io import upload_new_batch, download_labels, WEBHOOK_PORT, labeling_completed_event, start_webhook_listener
 from stable_baselines3.common.utils import set_random_seed
 
 def get_trajectory_ids(path, run_id):
@@ -47,7 +47,7 @@ def get_unique_trajectories_from_csv(csv_path, run_id, curr_iter):
         if 'iteration' in df.columns:
             iterations = set(df['iteration'].dropna().unique())
             expected_iterations = set(range(curr_iter))
-            if iterations != expected_iterations:
+            if iterations != expected_iterations and curr_iter > 0:
                 raise ValueError(f"CSV iteration column has entries for iterations {iterations}, but expected {expected_iterations}. Please ensure the CSV is complete and up-to-date before running the video pipeline.")
 
         # 3. Process the strings:
@@ -128,9 +128,20 @@ class VideoFramework:
         elif self.sampling_strategy == SamplingStrategy.BordaCopeland:
             self.config.pair_num = -1 # For BordaCopeland, we will generate all valid pairs, so n_pairs is not predetermined
             self.sampler = BordaCopelandSampling(traj_ids=self.video_idx, new_episodes=self.new_episodes_idx, preferences_csv=self.preferences_csv, sampler_state_json=self.sampler_state_json)
+        elif self.sampling_strategy == SamplingStrategy.TrueSkill:
+            self.config.pair_num = -1 # For TrueSkill, we will generate pairs until exhaustion, so n_pairs is not predetermined
+            self.sampler = TrueSkillSampling(traj_ids=self.video_idx, 
+                                             new_episodes=self.new_episodes_idx, 
+                                             preferences_csv=self.preferences_csv, 
+                                             sampler_state_json=self.sampler_state_json,
+                                             curr_iter=self.config.curr_iter)
         elif self.sampling_strategy == SamplingStrategy.SwissInfoGain:
             self.config.pair_num = -1 # For SwissInfoGain, we will generate pairs until exhaustion, so n_pairs is not predetermined
-            self.sampler = SwissInfoGainSampling(traj_ids=self.video_idx, new_episodes=self.new_episodes_idx, preferences_csv=self.preferences_csv, sampler_state_json=self.sampler_state_json)
+            self.sampler = SwissInfoGainSampling(traj_ids=self.video_idx, 
+                                                 new_episodes=self.new_episodes_idx, 
+                                                 preferences_csv=self.preferences_csv, 
+                                                 sampler_state_json=self.sampler_state_json,
+                                                 curr_iter=self.config.curr_iter)
         elif self.sampling_strategy  == SamplingStrategy.SwissTournament:
             self.config.pair_num = -1 # For SwissTournament, we will generate pairs until exhaustion, so n_pairs is not predetermined
             # self.sampler = SwissTournamentSampling(traj_ids=self.video_idx, new_episodes=self.new_episodes_idx, preferences_csv=self.preferences_csv)
@@ -147,9 +158,13 @@ class VideoFramework:
             raise ValueError(f"Unsupported video processing mode: {self.video_processing_mode}")
 
     def start(self, max_workers=8):
+        # Start listening for webhooks immediately
+        start_webhook_listener(port=WEBHOOK_PORT)
+        if self.config.notifications:
+            notify_new_iteration_started(self.config.exp_group_name, first=(self.config.curr_iter==0))
         while True:
             start_time = time.perf_counter()
-            # 1. Ask Sampler for work
+            # 1. Ask Sampler for pairs
             pairs = self.sampler.get_next_pairs(traj_ids=self.video_idx, new_episodes=self.new_episodes_idx, n_pairs=self.config.pair_num)
             
             # 2. If Sampler returns empty array, we are done
@@ -160,40 +175,53 @@ class VideoFramework:
             # 3 Convert IDs back to names for video processing
             pairs = [(f"traj{self.config.run_id:02}{idx1:03}", f"traj{self.config.run_id:02}{idx2:03}") for idx1, idx2 in pairs]
             
-            # # 4. Process pairs in Parallel
-            # print(f"Framework: Processing {len(pairs)} pairs on {max_workers} cores...")
-            # with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            #     futures = [
-            #         executor.submit(self.video_processor, p, str(self.input_dir), str(self.video_output_dir))
-            #         for p in pairs
-            #     ]
-            #     for f in futures:
-            #         print(f.result())
-            
-            pause_time = time.perf_counter()
-            # 4. Handle stateful pause (Only if the sampler requires interaction)
-            # TODO: Use a blocking mechanism to pause/resume the sampler based on an external signal
-            if self.sampling_strategy == SamplingStrategy.SwissInfoGain:
-                pass
-            unpause_time = time.perf_counter()
+            # 4. Process pairs in Parallel to generate videos for Label Studio
+            print(f"Framework: Processing {len(pairs)} pairs on {max_workers} cores...")
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self.video_processor, p, str(self.input_dir), str(self.video_output_dir))
+                    for p in pairs
+                ]
+                for f in futures:
+                    print(f.result())
 
             end_time = time.perf_counter()
-            # print(f"Framework: All pairs processed in {end_time - start_time - (unpause_time - pause_time):.2f} seconds.")
-            # print(f"Framework: Average time per video pair: {(end_time - start_time - (unpause_time - pause_time)) / len(pairs):.2f} seconds.")
+            print(f"Framework: All pairs processed in {end_time - start_time:.2f} seconds.")
+            print(f"Framework: Average time per video pair: {(end_time - start_time) / len(pairs):.2f} seconds.")
+            
+            # 5. Push videos to Label Studio
+            response = upload_new_batch(self.config.exp_group_name)
+            print(f"Uploaded {response['samples_uploaded']} new samples")
+            print(f"Skipped {response['samples_skipped']} pending or already labeled samples")
 
-            # break # For now, we break after one round for testing purposes. Remove this in production to allow continuous rounds until exhaustion.
-            # write pairs to the preference_raw.csv
-            with open(self.preferences_csv, 'a') as f:
-                for p in pairs:
-                    f.write(f"\n{p[0]}_{p[1]}.mp4,left,0,{self.sampler.round_number}")
+            # 6. Notify annotators about the new round
+            if self.config.notifications:
+                notify_new_round(self.config.exp_group_name)
+            
+            # 7. Reset the buzzer
+            labeling_completed_event.clear()
+            print("⏳ Pipeline paused.")
+            
+            # 8. FREEZE THE SCRIPT HERE. It will wait forever until the webhook hits.
+            labeling_completed_event.wait()
 
-            # input("Round complete. Update CSV results and press Enter to continue...")
+            # 9. Download labels and purge Azure for the next round
+            response = download_labels(self.config.exp_group_name, iteration=self.sampler.curr_iter, round=self.sampler.round_number, purge=True)
+            print(f"Received {response['annotations_processed']} annotations...")
+            # print(f"Labeled data: {response['preference_data']}")
+            # print(f"Items purged from Azure and Label Studio: {response['purged_count']}")
+            if response['remaining_in_queue'] > 0:
+                print(f"Items remaining in queue: {response['remaining_in_queue']}")
+            
+        if self.config.notifications:
+            notify_iteration_done(self.config.exp_group_name)
 
 @click.command()
 # Experiment params
 @click.option('--run_id', default=0, type=int, help='Index (and seed) of the current run')
 @click.option('--group_name', type=str, help='Group name (wandb option), leave blank if not logging with wandb')
 @click.option('--log_dir', default='./logs', type=str, help='Directory for saving training logs')
+@click.option('--notifications', default=False, type=bool, help='Whether to send notifications to annotators via the bridge')
 # Env params
 @click.option('--env_source', default='minigrid', type=str, help='minigrid or procgen')
 @click.option('--game_name', default="DoorKey-8x8", type=str, help='e.g. DoorKey-8x8, ninja, jumper')
@@ -217,7 +245,7 @@ class VideoFramework:
 @click.option('--traj_overwrite', default=True, type=bool, help='Whether the generated trajectory pairs should replace existing ones in the output directory (if 0, trajectories will be saved alongside existing ones, possibly overwriting ones with the same name)')
 @click.option('--record_video', default=0, type=int, help='Whether the environment should be wrapped in a video recorder (don\'t use for human feedback setting)')
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
-def main(run_id, group_name, log_dir, env_source, game_name, project_name, fixed_seed, pair_num, curr_iter, int_rew_source, 
+def main(run_id, group_name, log_dir, notifications, env_source, game_name, project_name, fixed_seed, pair_num, curr_iter, int_rew_source, 
          write_local_logs, exp_group_name, sampling_strategy, video_processing_mode, num_processes, add_xai_videos, traj_overwrite, record_video, env_render):
     
     set_random_seed(run_id, using_cuda=False)

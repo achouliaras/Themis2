@@ -86,11 +86,11 @@ class SwissInfoGainSampling:
                         expected_scores[p1] += p_win
                         expected_scores[p2] += 1 - p_win
 
-                        if label == 'left':
+                        if label == 'Left':
                             s1, s2 = 1.0, 0.0
-                        elif label == 'right':
+                        elif label == 'Right':
                             s1, s2 = 0.0, 1.0
-                        elif label == 'draw':
+                        elif label == 'Equal':
                             s1, s2 = 0.5, 0.5
                         else:
                             raise ValueError(f"Invalid label in match: {label}")
