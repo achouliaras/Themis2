@@ -39,6 +39,20 @@ class TrainingConfig():
         if self.env_source == EnvSrc.MiniGrid and not game_name.startswith('MiniGrid-'):
             env_name = f'MiniGrid-{game_name}'
             env_name += '-v0'
+        if self.env_source == EnvSrc.Atari and not game_name.startswith('ALE/'):
+            env_name = f'ALE/{game_name}'
+            env_name += '-v5'
+        if self.env_source == EnvSrc.MuJoCo and not game_name.endswith('-v5'):
+            env_name = f'{game_name}-v5'
+        if self.env_source == EnvSrc.ClassicControl and not (game_name.endswith('-v1') or game_name.endswith('-v0')):
+            if game_name in ['CartPole', 'Acrobot', 'Pendulum']:
+                env_name = f'{game_name}-v1'
+            elif game_name in ['MountainCar', 'MountainCarContinuous']:
+                env_name = f'{game_name}-v0'
+            else:
+                raise NotImplementedError(f'Unknown ClassicControl game {game_name}')
+        if self.env_source == EnvSrc.Box2D and not game_name.endswith('-v3'):
+            env_name = f'{game_name}-v3'
         self.env_name = env_name
         self.project_name = env_name if project_name is None else project_name
 
@@ -108,7 +122,15 @@ class TrainingConfig():
                 seed=seed if seed is not None else self.run_id,
             )
             env = VecTransposeImage(env)
-            
+        elif self.env_source in [EnvSrc.MuJoCo, EnvSrc.Atari, EnvSrc.ClassicControl, EnvSrc.Box2D]:
+            env = make_vec_env(
+                self.env_name,
+                wrapper_class=wrapper_class,
+                vec_env_cls=DummyVecEnv,
+                n_envs=num_processes,
+                monitor_dir=None,
+                seed=seed if seed is not None else self.run_id,
+            )     
         elif self.env_source == EnvSrc.ProcGen:
             # Procgen is natively vectorized; we just force it to 1 environment
             env = ProcgenEnv(
@@ -143,6 +165,15 @@ class TrainingConfig():
 
     def get_venv(self, wrapper_class=None):
         if self.env_source == EnvSrc.MiniGrid:
+            venv = make_vec_env(
+                self.env_name,
+                wrapper_class=wrapper_class,
+                vec_env_cls=CustomSubprocVecEnv,
+                n_envs=self.num_processes,
+                monitor_dir=self.log_dir,
+                seed=self.run_id,
+            )
+        elif self.env_source in [EnvSrc.MuJoCo, EnvSrc.Atari, EnvSrc.ClassicControl, EnvSrc.Box2D]:
             venv = make_vec_env(
                 self.env_name,
                 wrapper_class=wrapper_class,

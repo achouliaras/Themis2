@@ -195,8 +195,8 @@ def train(config):
             rl_policy=model.policy,
             use_model_rnn=config.use_model_rnn,
         )
-        # TODO: GET DATA FROM FILES
-        r_model.learn(episode_num=config.episode_num, init = True)
+        preference_path = f"/home/achouliaras/crowdsourcing-platform/label-studio/data/{config.exp_group_name}"
+        r_model.learn_from_human(data_path=config.log_dir, preference_path=preference_path)
         r_model.policy.save(path=config.log_dir+'/reward_model_step_'+str(train_steps))
         model.learn(total_timesteps=train_steps, callback=callbacks)
         model.save(path=config.log_dir+'/train_model_'+str(train_steps))
@@ -212,7 +212,7 @@ def train(config):
                     rl_policy=model.policy,
                     use_model_rnn=config.use_model_rnn,
                 )
-                r_model.learn(episode_num=config.episode_num, pair_num=config.pair_num, init = (i==0))
+                r_model.learn_from_synthetic(episode_num=config.episode_num, pair_num=config.pair_num, init = (i==0))
             model.learn(total_timesteps=step, init = (i==0), reset_num_timesteps=(i==0), callback=callbacks)
 
         r_model.policy.save(path=config.log_dir+'/reward_model_step_'+str(i+step))
@@ -222,6 +222,7 @@ def train(config):
 # Training params
 @click.option('--run_id', default=0, type=int, help='Index (and seed) of the current run')
 @click.option('--group_name', type=str, help='Group name (wandb option), leave blank if not logging with wandb')
+@click.option('--exp_group_name', default='cgroup', type=str, help='Experimenal group name for organizing output videos')
 @click.option('--log_dir', default='./logs', type=str, help='Directory for saving training logs')
 @click.option('--total_steps', default=int(1e6), type=int, help='Total number of frames to run for training')
 @click.option('--pretrain_percentage', default=0.0, type=float, help='Percentage of frames used for pre-training')
@@ -331,7 +332,7 @@ def train(config):
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
 @click.option('--use_status_predictor', default=0, type=int, help='Whether to train status predictors for analysis (MiniGrid only)')
 def main(
-    run_id, group_name, log_dir, total_steps, pretrain_percentage, features_dim, model_features_dim, learning_rate, model_learning_rate,
+    run_id, group_name, exp_group_name, log_dir, total_steps, pretrain_percentage, features_dim, model_features_dim, learning_rate, model_learning_rate,
     num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, can_see_walls, fully_obs,
     image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, n_epochs, model_n_epochs,
     gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, adv_norm, adv_eps,

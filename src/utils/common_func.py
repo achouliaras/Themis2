@@ -3,7 +3,6 @@ import torch as th
 
 from torch import nn
 from typing import Optional, Callable
-from src.utils.enum_types import NormType, EnvSrc, ModelType
 
 
 def bkdr_hash(inputs, seed=131, mask=0x7fffffff):

@@ -99,6 +99,8 @@ class EnvSrc(Enum):
     ProcGen = 1
     MuJoCo = 2
     Atari = 3
+    ClassicControl = 4
+    Box2D = 5
 
     @staticmethod
     def get_enum_env_src(env_src):
@@ -114,6 +116,10 @@ class EnvSrc(Enum):
                 return EnvSrc.MuJoCo
             if env_src == 'atari':
                 return EnvSrc.Atari
+            if env_src in ['classiccontrol', 'classic_control']:
+                return EnvSrc.ClassicControl
+            if env_src == 'box2d':
+                return EnvSrc.Box2D
         raise ValueError
 
 class SamplingStrategy(Enum):
