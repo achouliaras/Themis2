@@ -768,6 +768,7 @@ class PPORollout(BaseAlgorithm):
     def learn(
         self,
         total_timesteps: int,
+        num_timesteps_completed: int = 0,
         init: bool = True,
         callback: MaybeCallback = None,
         log_interval: int = 1,
@@ -804,6 +805,10 @@ class PPORollout(BaseAlgorithm):
             self.on_training_start()
         # print('Collecting rollouts ...')
 
+        if num_timesteps_completed > 0:
+            self.num_timesteps = num_timesteps_completed
+            total_timesteps += num_timesteps_completed
+
         while self.num_timesteps < total_timesteps:
             collect_start_time = time.time()
             self.policy.eval()
@@ -834,11 +839,12 @@ class PPORollout(BaseAlgorithm):
             rews = [ep_info["r"] for ep_info in self.ep_info_buffer]
             rew_mean = 0.0 if len(rews) == 0 else np.mean(rews)
             print(f'--RL-- '
-                  f'run: {self.run_id:2d}  '
-                  f'iters: {self.iteration}  '
-                  f'frames: {self.num_timesteps}  '
-                  f'rew: {rew_mean:.6f}  '
-                  f'rollout: {collect_end_time - collect_start_time:.3f} sec  '
+                  f'run: {self.run_id:2d}, '
+                  f'iters: {self.iteration}, '
+                  f'frames: {self.num_timesteps}, '
+                  f'rew: {rew_mean:.6f}, '
+                  f'true_rew: {self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8):.6f}, '
+                  f'rollout: {collect_end_time - collect_start_time:.3f} sec, '
                   f'train: {train_end_time - train_start_time:.3f} sec')
         callback.on_training_end()
         return self
@@ -856,4 +862,4 @@ class PPORollout(BaseAlgorithm):
             "_last_policy_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_policy_features]),
             "_last_model_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_model_features]),
         }
-        super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)
+        return super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)

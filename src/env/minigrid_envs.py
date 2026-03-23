@@ -6,12 +6,119 @@ The code was created based on the official implementation of gym-minigrid
 
 from minigrid.envs import DoorKeyEnv
 from minigrid.minigrid_env import MiniGridEnv
+from minigrid.core.mission import MissionSpace
 from minigrid.core.grid import Grid, Wall
 from minigrid.core.world_object import Goal, Door, Key, Ball, Box
 from minigrid.core.constants import COLOR_NAMES, DIR_TO_VEC
 from minigrid.core.roomgrid import RoomGrid
 from minigrid import register
 
+class BlockedUnlockPickupEnv(RoomGrid):
+    """
+
+    ## Description
+    The agent has to reach a goal square which is placed in another room, behind a
+    locked door. The door is also blocked by a ball which the agent has to move
+    before it can unlock the door. Hence, the agent has to learn to move the
+    ball, pick up the key, open the door, and navigate to the goal square in the 
+    other room.
+
+    ## Mission Space
+
+    "get to the green goal square"
+
+    ## Action Space
+
+    | Num | Name         | Action            |
+    |-----|--------------|-------------------|
+    | 0   | left         | Turn left         |
+    | 1   | right        | Turn right        |
+    | 2   | forward      | Move forward      |
+    | 3   | pickup       | Pick up an object |
+    | 4   | drop         | Drop an object    |
+    | 5   | toggle       | Toggle/Open       |
+    | 6   | done         | Unused            |
+
+    ## Observation Encoding
+
+    - Each tile is encoded as a 3 dimensional tuple:
+        `(OBJECT_IDX, COLOR_IDX, STATE)`
+    - `OBJECT_TO_IDX` and `COLOR_TO_IDX` mapping can be found in
+        [minigrid/core/constants.py](minigrid/core/constants.py)
+    - `STATE` refers to the door state with 0=open, 1=closed and 2=locked
+
+    ## Rewards
+
+    A reward of '1 - 0.9 * (step_count / max_steps)' is given for success, and '0' for failure.
+
+    ## Termination
+
+    The episode ends if any one of the following conditions is met:
+
+    1. The agent reaches the goal square.
+    2. Timeout (see `max_steps`).
+
+    ## Registered Configurations
+
+    - `MiniGrid-BlockedUnlockPickup-v0`
+
+    """
+
+    def __init__(self, max_steps: int | None = None, **kwargs):
+        mission_space = MissionSpace(mission_func=self._gen_mission)
+
+        room_size = 6
+        if max_steps is None:
+            max_steps = 16 * room_size**2
+
+        super().__init__(
+            mission_space=mission_space,
+            num_rows=1,
+            num_cols=2,
+            room_size=room_size,
+            max_steps=max_steps,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _gen_mission():
+        return f"get to the green goal square"
+
+    def _gen_grid(self, width, height):
+        super()._gen_grid(width, height)
+
+        # Make sure the two rooms are directly connected by a locked door
+        door, pos = self.add_door(0, 0, 0, locked=True)
+        
+        # Add a key to unlock the door
+        self.add_object(0, 0, "key", door.color)
+
+        # Place a goal in the room on the right
+        obj, goal_pos = self.place_in_room(1, 0, Goal())
+        self.goal_pos = goal_pos
+
+        # Block the door with a ball
+        color = self._rand_color()
+        self.grid.set(pos[0] - 1, pos[1], Ball(color))
+
+        self.place_agent(0, 0)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+
+        info["true_reward"] = 0
+
+        if tuple(self.agent_pos) == tuple(self.goal_pos):
+            info["true_reward"] = self._reward()
+            reward = self._reward()
+            terminated = True
+
+        return obs, reward, terminated, truncated, info
+
+register(
+    id='MiniGrid-BlockedUnlockPickup-v0',
+    entry_point='src.env.minigrid_envs:BlockedUnlockPickupEnv'
+)
 
 class CustomDoorKeyEnv(MiniGridEnv):
 
@@ -1117,3 +1224,4 @@ register(
     id="MiniGrid-ObstructedMaze-Full-V3-v0",
     entry_point="src.env.minigrid_envs:ObstructedMaze_Full_V3"
 )
+

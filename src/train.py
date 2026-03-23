@@ -1,3 +1,5 @@
+import os, re
+import glob
 import click
 import warnings
 
@@ -6,6 +8,7 @@ import warnings
 # Suppress Pydantic v2 field attribute warnings from dependencies
 warnings.filterwarnings("ignore", message=".*attribute with value.*was provided to the.*Field.*function.*")
 
+from flask import config
 import torch as th
 
 # noinspection PyUnresolvedReferences
@@ -131,15 +134,49 @@ def train(config):
     pretrain_steps = int(config.total_steps * config.pretrain_percentage)
     train_steps = config.total_steps - pretrain_steps
 
+    num_timesteps_completed = 0
     if config.pretrain_percentage > 0.0:
-        try:
-            model.load(path=config.log_dir+'/pretrain_model')
-            print('Pretrained model loaded.')
-        except FileNotFoundError:  
-            print('Model not found. Pretraining ...')  
+        search_pattern = os.path.join(config.log_dir, 'pretrain_model_*')
+        matching_files = glob.glob(search_pattern)
+        if not matching_files:
+            print('Model not found. Pretraining ...') 
+            config.local_logger.flush_all()
             model.pretrain_mode()
             model.learn(total_timesteps=pretrain_steps, callback=callbacks)
-            model.save(path=config.log_dir+'/pretrain_model')
+            num_timesteps_completed = model.num_timesteps
+            model.save(path=config.log_dir+f'/pretrain_model_{num_timesteps_completed}')
+            if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1:
+                # It's Human Teacher setting. Stop script after pretraining, to allow manual annotation of preference pairs.
+                print("Pretraining completed. Run generate trajectories and video pipeline before resuming PPO training.")
+                return
+        else:
+            if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1 and config.curr_iter > 0:
+                # It's Human Teacher setting and there is at least one pretrained model.
+                # Load latest trained model chechpoint instead of pretrained model, to resume interrupted training.
+                search_pattern = os.path.join(config.log_dir, 'train_model_*')
+                train_matching_files = glob.glob(search_pattern)
+                if not train_matching_files:
+                    raise ValueError(f"Training model checkpoint not found for resuming training at iteration {config.curr_iter}. Expected at least one file matching: {search_pattern}")
+                latest_model_path = max(train_matching_files, key=os.path.getmtime)
+                model.load(path=latest_model_path, device=config.device)
+                match = re.search(r'train_model_(\d+)', os.path.basename(latest_model_path))
+                if match:
+                    num_timesteps_completed = int(match.group(1))
+                else:
+                    raise ValueError(f"Could not extract training steps from filename: {latest_model_path}")
+                print(f"Resuming training from checkpoint at iteration {config.curr_iter} with {num_timesteps_completed} pretrain steps completed.")  
+            else:
+                # Load latest pretrained model checkpoint.
+                latest_model_path = max(matching_files, key=os.path.getmtime)
+                model.load(path=latest_model_path, device=config.device)
+                match = re.search(r'pretrain_model_(\d+)', os.path.basename(latest_model_path))
+                if match:
+                    num_timesteps_completed = int(match.group(1))
+                else:
+                    raise ValueError(f"Could not extract pretrain steps from filename: {latest_model_path}")
+                print('Pretrained model loaded.')
+            config.local_logger.truncate(target_value=num_timesteps_completed)
+            
     model.train_mode()
     if config.reward_learning_frequency != 0:
         
@@ -181,25 +218,29 @@ def train(config):
             policy_kwargs = rew_policy_kwargs,
             local_logger=config.local_logger,
             sampling_strategy = config.sampling_strategy,
-
         )
 
     if config.reward_learning_frequency == 0:
         # do not train reward model
         print("Training with extrinsic + intrinsic rewards.")
-        model.learn(total_timesteps=train_steps, callback=callbacks)
-        model.save(path=config.log_dir+'/train_model')
+        model.learn(total_timesteps=train_steps, num_timesteps_completed=num_timesteps_completed, callback=callbacks)
+        num_timesteps_completed = model.num_timesteps
+        model.save(path=config.log_dir+f'/train_model_{num_timesteps_completed}')
     elif config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1:
         # Trains reward model only once at the beginning (FOR HUMAN PARTICIPANTS)
         r_model.add_rl_policy_models(
             rl_policy=model.policy,
             use_model_rnn=config.use_model_rnn,
         )
+        config.local_logger.truncate(target_value=num_timesteps_completed, prefix='rm')
         preference_path = f"/home/achouliaras/crowdsourcing-platform/label-studio/data/{config.exp_group_name}"
-        r_model.learn_from_human(data_path=config.log_dir, preference_path=preference_path)
-        r_model.policy.save(path=config.log_dir+'/reward_model_step_'+str(train_steps))
-        model.learn(total_timesteps=train_steps, callback=callbacks)
-        model.save(path=config.log_dir+'/train_model_'+str(train_steps))
+        r_model.learn_from_human(data_path=config.log_dir, preference_path=preference_path, curr_iter=config.curr_iter, timestep_log=num_timesteps_completed)
+        r_model.policy.save(path=config.log_dir+f'/reward_model_step_{num_timesteps_completed}')
+        train_for = config.train_for
+        print(f"Iter: {config.curr_iter}, Training for {train_for} steps total")
+        model.learn(total_timesteps=train_for, num_timesteps_completed=num_timesteps_completed, callback=callbacks)
+        num_timesteps_completed = model.num_timesteps
+        model.save(path=config.log_dir+f'/train_model_{num_timesteps_completed}')
     else:
         if pretrain_steps == 0:
             raise ValueError("Training a reward model requires pretrained agent.")
@@ -215,8 +256,9 @@ def train(config):
                 r_model.learn_from_synthetic(episode_num=config.episode_num, pair_num=config.pair_num, init = (i==0))
             model.learn(total_timesteps=step, init = (i==0), reset_num_timesteps=(i==0), callback=callbacks)
 
-        r_model.policy.save(path=config.log_dir+'/reward_model_step_'+str(i+step))
-        model.policy.save(path=config.log_dir+'/train_model_step_'+str(i+step))
+        num_timesteps_completed = model.num_timesteps
+        r_model.policy.save(path=config.log_dir+f'/reward_model_step_{num_timesteps_completed}')
+        model.policy.save(path=config.log_dir+f'/train_model_step_{num_timesteps_completed}')
 
 @click.command()
 # Training params
@@ -268,6 +310,8 @@ def train(config):
 @click.option('--preference_buffer_capacity', default=int(1e4), type=int, help='Number of episodes that can be stored in the preference buffer')
 @click.option('--sampling_strategy', default='Uniform', type=str, help='Sampling strategy for generating preference pairs: [Uniform|SwissInfoGain]')
 @click.option('--pair_num', default=128, type=int, help='Number of preference pairs to be generated for Reward Model training (used for relevant strategies)')
+@click.option('--curr_iter', default=-1, type=int, help='Current iteration of reward model training (used for sampling strategy state management). Set to -1 when using synthetic teachers, and to the current iteration number when using human teachers (for resuming interrupted training).')
+@click.option('--train_for', default=0, type=int, help='Total number of steps to train the agent for after the reward model is trained (used when reward_learning_frequency is set to a positive value)')
 @click.option('--reward_epochs', default=100, type=int, help='Number of epochs to train Reward Model')
 @click.option('--reward_batch_size', default=32, type=int, help='Batch size for Reward Model training (Preferred, cause of variable-length sequences)')
 @click.option('--reward_learning_rate', default=3e-2, type=float, help='Learning rate of Reward Model')
@@ -300,7 +344,7 @@ def train(config):
 @click.option('--use_model_rnn', default=1, type=int, help='Whether to enable RNNs for the dynamics model')
 @click.option('--latents_dim', default=256, type=int, help='Dimensions of latent features in policy/value nets\' MLPs')
 @click.option('--model_latents_dim', default=256, type=int, help='Dimensions of latent features in the dynamics model\'s MLP')
-@click.option('--policy_cnn_type', default=0, type=int, help='CNN Structure ([0-2] from small to large)')
+@click.option('--policy_cnn_type', default=0, type=int, help='CNN Structure ([0-2] from small to large, [-1] for tabular observations)')
 @click.option('--policy_mlp_layers', default=1, type=int, help='Number of latent layers used in the policy\'s MLP')
 @click.option('--policy_cnn_norm', default='BatchNorm', type=str, help='Normalization type for policy/value nets\' CNN')
 @click.option('--policy_mlp_norm', default='BatchNorm', type=str, help='Normalization type for policy/value nets\' MLP')
@@ -336,7 +380,7 @@ def main(
     num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, can_see_walls, fully_obs,
     image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, n_epochs, model_n_epochs,
     gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, adv_norm, adv_eps,
-    adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, 
+    adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter, train_for,
     reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn,
     ext_rew_coef, ext_rew_pretrain_coef, int_rew_coef, int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip,
     aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum,

@@ -90,7 +90,10 @@ def video_concat(pair, input_dir, output_dir):
 
 class VideoFramework:
     def __init__(self, config):
-        input_path = os.path.join(config.log_dir, "traj_videos")
+        if config.add_xai_videos:
+            input_path = os.path.join(config.log_dir, "traj_xai_videos")
+        else:    
+            input_path = os.path.join(config.log_dir, "traj_videos")
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"Input path {input_path} does not exist. Please ensure trajectory videos are generated before running the video pipeline.")
         output_path = os.path.join(f"/home/achouliaras/crowdsourcing-platform/label-studio/data/{config.exp_group_name}")

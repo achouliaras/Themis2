@@ -66,7 +66,6 @@ class CustomCnnFeaturesExtractor(BaseFeaturesExtractor):
 
                     nn.Flatten(),
                 )
-
         elif model_type == 1:
             if self.n_input_size == 84: image_sizes = [20, 9, 6]
             elif self.n_input_size == 64: image_sizes = [15, 6, 3]
@@ -90,7 +89,6 @@ class CustomCnnFeaturesExtractor(BaseFeaturesExtractor):
 
                 nn.Flatten(),
             )
-
         elif model_type == 2:
             # IMPALA CNNs
             layer_scale = 1
@@ -114,6 +112,8 @@ class CustomCnnFeaturesExtractor(BaseFeaturesExtractor):
                 NormType.get_norm_layer_1d(self.norm_type, n_flatten),
                 activation_fn(),
             )
+        elif model_type == -1:
+            self.cnn = nn.Identity()
         else:
             raise NotImplementedError
 

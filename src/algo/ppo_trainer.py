@@ -315,6 +315,7 @@ class PPOTrainer(PPORollout):
     def learn(
         self,
         total_timesteps: int,
+        num_timesteps_completed: Optional[int] = 0,
         init: bool = True,
         callback: MaybeCallback = None,
         log_interval: int = 1,
@@ -329,6 +330,7 @@ class PPOTrainer(PPORollout):
 
         return super(PPOTrainer, self).learn(
             total_timesteps=total_timesteps,
+            num_timesteps_completed=num_timesteps_completed,
             init=init,
             callback=callback,
             log_interval=log_interval,
@@ -351,5 +353,5 @@ class PPOTrainer(PPORollout):
         super(PPOTrainer, self).save(path, include=["run_id"])
 
     def load(self, path: str, device: th.device) -> None:
-        super(PPOTrainer, self).load(path, device=device)
+        return super(PPOTrainer, self).load(path, device=device)
     

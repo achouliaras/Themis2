@@ -57,7 +57,6 @@ class TrainingConfig():
         self.project_name = env_name if project_name is None else project_name
 
     def init_logger(self):
-        
         if self.group_name is not None:
             self.wandb_run = wandb.init(
                 name=f'{self.int_rew_source}-run-id-{self.run_id}',

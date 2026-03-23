@@ -162,3 +162,46 @@ class VideoProcessingMode(Enum):
             if mode == 'topbottom':
                 return VideoProcessingMode.TopBottom
         raise ValueError
+    
+class XplainMethod(Enum):
+    Saliency = 0
+    SmoothSaliency = 1
+    InputXGradient = 2
+    GuidedBackprop = 3
+    Deconvolution = 4
+    IntegratedGradients = 5
+    SmoothIntegratedGradients = 6
+    GradientSHAP = 7
+    DeepLift = 8
+    DeepLiftShap = 9
+    GradCAM = 10
+
+    @staticmethod
+    def get_enum_xplain_method(method):
+        if isinstance(method, XplainMethod):
+            return method
+        if isinstance(method, str):
+            method = method.strip().lower()
+            if method == 'saliency':
+                return XplainMethod.Saliency
+            if method in ['inputxgradient', 'input_x_gradient', 'inputxgrad']:
+                return XplainMethod.InputXGradient
+            if method in ['guidedbackprop', 'guided_backprop', 'guidedbp']:
+                return XplainMethod.GuidedBackprop
+            if method in ['deconvolution', 'deconv']:
+                return XplainMethod.Deconvolution
+            if method in ['integratedgradients', 'integrated_gradients', 'intgradients']:
+                return XplainMethod.IntegratedGradients
+            if method in ['deeplift']:
+                return XplainMethod.DeepLift
+            if method in ['gradientshap', 'gradient_shap']:
+                return XplainMethod.GradientSHAP
+            if method in ['deepliftshap', 'deeplift_shap']:
+                return XplainMethod.DeepLiftShap
+            if method in ['gradcam', 'grad_cam']:
+                return XplainMethod.GradCAM
+            if method in ['smoothsaliency', 'smooth_saliency']:
+                return XplainMethod.SmoothSaliency
+            if method in ['smoothintegratedgradients', 'smooth_integrated_gradients', 'smoothintgradients']:
+                return XplainMethod.SmoothIntegratedGradients
+        raise ValueError

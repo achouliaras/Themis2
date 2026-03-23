@@ -5,7 +5,7 @@ import warnings
 warnings.filterwarnings("ignore", message=".*attribute with value.*was provided to the.*Field.*function.*")
 
 from concurrent.futures import ThreadPoolExecutor
-import os, re, time
+import os, re, time, glob
 import imageio
 import numpy as np
 import pandas as pd
@@ -16,7 +16,8 @@ from src.env.minigrid_envs import *
 from src.algo.ppo_model import PPOModel
 from src.algo.ppo_trainer import PPOTrainer
 from src.utils.configs import TrainingConfig
-from src.utils.enum_types import EnvSrc
+from src.utils.enum_types import EnvSrc, XplainMethod
+from src.utils.xai_utils import fetch_captum_explainer, generate_attribution_map
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.utils import obs_as_tensor
 
@@ -40,8 +41,8 @@ def generate_trajectories(config):
     th.backends.cudnn.benchmark = False
 
     if config.gen_xai_videos:
-        traj_videos_path = os.path.join(config.log_dir, "traj_xai_videos")
-        os.makedirs(traj_videos_path, exist_ok=True)
+        traj_xai_videos_path = os.path.join(config.log_dir, "traj_xai_videos")
+        os.makedirs(traj_xai_videos_path, exist_ok=True)
     traj_videos_path = os.path.join(config.log_dir, "traj_videos")
     os.makedirs(traj_videos_path, exist_ok=True)
     traj_data_path = os.path.join(config.log_dir, "traj_data")
@@ -53,6 +54,11 @@ def generate_trajectories(config):
 
     if config.traj_overwrite:
         # Remove existing trajectory videos and data if overwrite is enabled
+        if config.gen_xai_videos:
+             for filename in os.listdir(traj_xai_videos_path):
+                file_path = os.path.join(traj_xai_videos_path, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
         for filename in os.listdir(traj_videos_path):
             file_path = os.path.join(traj_videos_path, filename)
             if os.path.isfile(file_path):
@@ -106,6 +112,10 @@ def generate_trajectories(config):
         n_steps=config.n_steps,
     )
 
+    if config.gen_xai_videos:
+        xai_kwargs = {}
+
+        
     start_time = time.perf_counter()
     chunks = [gen_video_ids[i:i + config.chunk_size] for i in range(0, len(gen_video_ids), config.chunk_size)]
     for chunk in chunks:
@@ -144,7 +154,20 @@ def generate_trajectories(config):
             log_explored_states=config.log_explored_states,
             verbose=0,
         )
-        model.load(path=config.log_dir+'/pretrain_model', device=model.device) # Load the pretrained model weights for trajectory generation
+        if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1 and config.curr_iter > 0:
+            # It's Human Teacher setting and there is at least one pretrained model.
+            # Load latest trained model chechpoint instead of pretrained model, to resume interrupted training.
+            search_pattern = os.path.join(config.log_dir, 'train_model_*')
+            matching_files = glob.glob(search_pattern)
+            if not matching_files:
+                raise ValueError(f"Training model checkpoint not found for resuming training at iteration {config.curr_iter}. Expected at least one file matching: {search_pattern}")
+            latest_model_path = max(matching_files, key=os.path.getmtime)
+        else:
+            search_pattern = os.path.join(config.log_dir, 'pretrain_model_*')
+            matching_files = glob.glob(search_pattern)
+            latest_model_path = max(matching_files, key=os.path.getmtime)
+
+        model = model.load(path=latest_model_path, device=model.device) # Load the pretrained model weights for trajectory generation
         model.policy.eval() # Set the policy to evaluation mode for trajectory generation
 
         ptr_str = f"Generating trajectories {chunk[0]}-{chunk[-1]}/{config.episode_num}: "
@@ -152,7 +175,6 @@ def generate_trajectories(config):
         writers = []
         xai_writers = []
         for vid in chunk:
-            path = f"{config.log_dir}/traj_videos/traj{vid:03}.mp4"
             writers.append(imageio.get_writer(
                     f"{config.log_dir}/traj_videos/traj{config.run_id:02}{vid:03}.mp4",
                     fps=config.fps,
@@ -162,7 +184,7 @@ def generate_trajectories(config):
             )
             if config.gen_xai_videos:
                 xai_writers.append(imageio.get_writer(
-                    f"{config.log_dir}/traj_xai_videos/xai{config.run_id:02}{vid:03}.mp4",
+                    f"{config.log_dir}/traj_xai_videos/traj{config.run_id:02}{vid:03}.mp4",
                     fps=config.fps,
                     codec="libx264",
                     quality=8
@@ -183,8 +205,25 @@ def generate_trajectories(config):
             return th.zeros(tensor_shape, device=model.device, dtype=th.float32)
         
         last_policy_mems = float_zeros([current_batch_size, model.policy.gru_layers, model.policy.dim_policy_features])
+        dones = np.zeros(current_batch_size, dtype=bool)
+        dones_target = np.zeros(current_batch_size, dtype=bool) # To track which environments have reached done=True at least once
+        if config.gen_xai_videos:
+            def forward_wrapper(obs_in, policy_mems_in, actions_in):
+                # 1. Pass the observation through the feature extractor
+                latent_pi, _, _ = model.policy.extract_features(obs_in, policy_mems_in)
+                
+                # 2. Generate the action distribution (logits/probs)
+                distribution = model.policy._get_action_dist_from_latent(latent_pi)
+                
+                # 3. CRITICAL: Calculate the log_prob of the ALREADY TAKEN actions
+                # Do not sample new actions!
+                log_probs = distribution.log_prob(actions_in)
+                # Return shape is (Batch, )
+                return log_probs
+            
+            xai_method = XplainMethod.get_enum_xplain_method(config.xai_method)
+            xplainer = fetch_captum_explainer(xai_method, forward_wrapper, model, kwargs=xai_kwargs) # Initialize the Captum explainer with the custom wrapper
 
-        done = np.zeros(current_batch_size, dtype=bool)
         for step in range(config.video_length):
             with th.no_grad():
                 obs_tensor = obs_as_tensor(last_obs, model.device)
@@ -199,25 +238,44 @@ def generate_trajectories(config):
             next_obs, rewards, dones, infos = env.step(clipped_action)
             frames = env.get_images()
             for i, writer in enumerate(writers):
-                if not done[i]: # Stop recording if that specific env finished
-                    writer.append_data(frames[i])
+                if dones_target[i]: # Stop recording if that specific env finished
+                    continue
+                writer.append_data(frames[i])
             if config.gen_xai_videos:
+                attribution_maps = generate_attribution_map(last_obs,
+                                                            last_policy_mems, 
+                                                            action,
+                                                            env, 
+                                                            model.device,
+                                                            xplainer,
+                                                            frames, 
+                                                            xai_method) # Generate attribution map for the current step
                 for i, xai_writer in enumerate(xai_writers):
-                    if not done[i]: # Stop recording if that specific env finished
-                        xai_writer.append_data(frames[i]) # TODO: Add saliency maps generation
+                    if dones_target[i]: # Stop recording if that specific env finished
+                        continue
+                    xai_writer.append_data(attribution_maps[i])
             
             for i in range(current_batch_size):
+                if dones_target[i]: # Skip logging for this environment if it has already reached done=True at least once
+                    continue
                 last_obs_list[i].append(last_obs[i])
                 next_obs_list[i].append(next_obs[i])
                 last_policy_mems_list[i].append(last_policy_mems[i].clone().cpu().numpy())
                 action_list[i].append(action[i])
                 reward_list[i].append(rewards[i]) # Use the individual reward for each environment
                 episode_starts_list[i].append(step == 0)
-                done_list[i].append(done[i])
+                done_list[i].append(dones[i])
             last_obs = next_obs
             last_policy_mems = policy_mem
-            if dones.all():
-                break
+            if dones.any():
+                dones_target = np.logical_or(dones_target, dones) # Update the target tracking which envs have reached done=True
+                if dones_target.all(): # If all environments have reached done=True at least once, we can stop the trajectory generation early
+                    break
+
+        for i in range(current_batch_size):
+            if not dones_target[i]: # Episode did not finish
+                done_list[i][-1] = True # Mark the last step as done to indicate episode termination in the saved data
+                
         env.close()
         writer.close()
         if config.gen_xai_videos:
@@ -228,10 +286,10 @@ def generate_trajectories(config):
                 "last_obs": np.array(last_obs_list[i], dtype=np.uint8),
                 "next_obs": np.array(next_obs_list[i], dtype=np.uint8),
                 "last_policy_mems": np.array(last_policy_mems_list[i], dtype=np.float32),
-                "action": np.array(action_list[i]),
-                "reward": np.array(reward_list[i], dtype=np.float32), # Downcast to save space
+                "actions": np.array(action_list[i]),
+                "rewards": np.array(reward_list[i], dtype=np.float32), # Downcast to save space
                 "episode_starts": np.array(episode_starts_list[i], dtype=bool),
-                "done": np.array(done_list[i], dtype=bool)
+                "dones": np.array(done_list[i], dtype=bool)
             }
             video_id = chunk[i]
             np.savez_compressed(f"{config.log_dir}/traj_data/traj{config.run_id:02}{video_id:03}.npz", **data)
@@ -247,6 +305,7 @@ def generate_trajectories(config):
 @click.option('--run_id', default=0, type=int, help='Index (and seed) of the current run')
 @click.option('--group_name', type=str, help='Group name (wandb option), leave blank if not logging with wandb')
 @click.option('--log_dir', default='./logs', type=str, help='Directory for saving training logs')
+@click.option('--total_steps', default=int(1e6), type=int, help='Total number of frames to run for training')
 # Agent params
 @click.option('--features_dim', default=64, type=int, help='Number of neurons of a learned embedding (PPO)')
 @click.option('--model_features_dim', default=128, type=int,
@@ -288,6 +347,7 @@ def generate_trajectories(config):
 @click.option('--preference_buffer_capacity', default=int(1e4), type=int, help='Number of episodes that can be stored in the preference buffer')
 @click.option('--sampling_strategy', default='Uniform', type=str, help='Sampling strategy for generating preference pairs: [Uniform|SwissInfoGain]')
 @click.option('--pair_num', default=128, type=int, help='Number of preference pairs to be generated for Reward Model training (used for relevant strategies)')
+@click.option('--curr_iter', default=0, type=int, help='Current iteration of reward model training (used for sampling strategy state management)')
 @click.option('--reward_epochs', default=100, type=int, help='Number of epochs to train Reward Model')
 @click.option('--reward_batch_size', default=32, type=int, help='Batch size for Reward Model training (Preferred, cause of variable-length sequences)')
 @click.option('--reward_learning_rate', default=3e-2, type=float, help='Learning rate of Reward Model')
@@ -327,18 +387,20 @@ def generate_trajectories(config):
 @click.option('--fps', default=5, type=int, help='FPS of generated trajectory videos (default is for MiniGrid)')
 @click.option('--video_length', default=100, type=int, help='Max length of the video (frames)')
 @click.option('--gen_xai_videos', default=False, type=bool, help='Whether to generate XAI videos saliency maps of policy predictions')
+@click.option('--xai_method', default='saliency', type=str, help='Method for generating XAI videos saliency maps of policy predictions')
 @click.option('--traj_overwrite', default=True, type=bool, help='Whether the generated trajectories should overwrite existing ones in the log directory (if 0, trajectories will be saved with an incremental index)')
 @click.option('--record_video', default=0, type=int, help='Whether the environment should be wrapped in a video recorder (don\'t use for human feedback setting)')
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
-def main(run_id, group_name, log_dir, features_dim, model_features_dim, num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, 
+def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_dim, num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, 
          can_see_walls, fully_obs, image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, 
          n_epochs, model_n_epochs, gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, 
-         adv_norm, adv_eps, adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, 
+         adv_norm, adv_eps, adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter,
          reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn, ext_rew_coef, int_rew_source, 
          use_model_rnn, 
          latents_dim, model_latents_dim, policy_cnn_type, policy_mlp_layers, policy_cnn_norm, policy_mlp_norm, policy_gru_norm, model_cnn_type, 
          model_mlp_layers, model_cnn_norm, model_mlp_norm, model_gru_norm, activation_fn, cnn_activation_fn, gru_layers, optimizer, 
-         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, chunk_size, fps, video_length, gen_xai_videos, traj_overwrite, record_video, env_render):
+         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, chunk_size, fps, video_length, gen_xai_videos, xai_method,
+         traj_overwrite, record_video, env_render):
     
     set_random_seed(run_id, using_cuda=True)
     args = locals().items()
