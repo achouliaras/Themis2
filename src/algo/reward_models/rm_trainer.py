@@ -1,5 +1,9 @@
+import os
+import re
+import copy
 import gymnasium as gym
 import numpy as np
+import pandas as pd
 import time
 import torch as th
 from torch import nn
@@ -57,6 +61,7 @@ class RewardModelTrainer(BaseAlgorithm):
         local_logger: Optional[LocalLogger] = None,
         use_wandb: bool = False,
         sampling_strategy: str = "Uniform",
+        synthetic_teacher: Optional[bool] = True,
     ):
         super(RewardModelTrainer, self).__init__(
             policy=policy,
@@ -92,6 +97,7 @@ class RewardModelTrainer(BaseAlgorithm):
         self.enable_plotting = enable_plotting
         self.policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
         self.sampling_strategy = sampling_strategy
+        self.synthetic_teacher = synthetic_teacher
         
         # Sanity check, otherwise it will lead to noisy gradient and NaN
         # because of the advantage normalization
@@ -143,6 +149,7 @@ class RewardModelTrainer(BaseAlgorithm):
             int_rew_momentum=self.int_rew_momentum,
             gru_layers=self.rl_policy.gru_layers,
             use_status_predictor=self.rl_policy.use_status_predictor,
+            synthetic_teacher=self.synthetic_teacher,
         )
 
     def _setup_synthetic_teacher(self, config: Optional[dict]=None) -> None:
@@ -676,16 +683,6 @@ class RewardModelTrainer(BaseAlgorithm):
         callback.on_rollout_end()
         return n_episodes, pair_indices
 
-    def save_preference_data(self, data_path: str) -> None:
-        # TODO: Save preference data to files [HUMAN FEEDBACK]
-        # use dict with keys: 'pair_indices', 'pair_mask', 'pair_labels'
-        pass
-
-    def load_preference_data(self, data_path: str) -> None:
-        # TODO: Load preference data from files [HUMAN FEEDBACK]
-        # use dict with keys: 'pair_indices', 'pair_mask', 'pair_labels'
-        pass
-
     def learn(self,
         episode_num: int,
         pair_num: int,
@@ -693,9 +690,28 @@ class RewardModelTrainer(BaseAlgorithm):
         log_interval: int = 1,
         tb_log_name: str = "CustomOnPolicyAlgorithm",
         reset_num_timesteps: bool = True,
-        use_synthetic_teacher: bool = True,
         teacher_config: Optional[dict] = None,
-        generate_new_rollouts: bool = True,
+        init: bool = True,
+    ) -> None:
+        return self.learn_from_synthetic(
+            episode_num=episode_num,
+            pair_num=pair_num,
+            callback=callback,
+            log_interval=log_interval,
+            tb_log_name=tb_log_name,
+            reset_num_timesteps=reset_num_timesteps,
+            teacher_config=teacher_config,
+            init=init,
+        )
+
+    def learn_from_synthetic(self,
+        episode_num: int,
+        pair_num: int,
+        callback: MaybeCallback = None,
+        log_interval: int = 1,
+        tb_log_name: str = "CustomOnPolicyAlgorithm",
+        reset_num_timesteps: bool = True,
+        teacher_config: Optional[dict] = None,
         init: bool = True,
     ) -> None:
         if init : self.iteration = 0
@@ -714,21 +730,19 @@ class RewardModelTrainer(BaseAlgorithm):
         callback.on_training_start(locals(), globals())
         self.on_training_start()
 
-        if use_synthetic_teacher:
-            self._setup_synthetic_teacher(teacher_config)
+        self._setup_synthetic_teacher(teacher_config)
 
         collect_start_time = time.time()
-        if generate_new_rollouts or use_synthetic_teacher:
-            # print('Collecting rollouts ...')
-            train_strategy = self._setup_sampling_strategy(pair_num)
-            n_episodes, train_pair_indices = self.collect_rollouts(
-                self.env,
-                callback,
-                self.preference_buffer,
-                episode_num=episode_num,
-                strategy=train_strategy,
-                verbose=self.verbose,
-            )
+        # print('Collecting rollouts ...')
+        train_strategy = self._setup_sampling_strategy(pair_num)
+        n_episodes, train_pair_indices = self.collect_rollouts(
+            self.env,
+            callback,
+            self.preference_buffer,
+            episode_num=episode_num,
+            strategy=train_strategy,
+            verbose=self.verbose,
+        )
 
         self.val_buffer = PreferenceBuffer(
             int(self.preference_buffer_capacity * val_ratio)*self.max_episode_length,
@@ -748,41 +762,26 @@ class RewardModelTrainer(BaseAlgorithm):
             use_status_predictor=self.rl_policy.use_status_predictor,
         )
 
-        if generate_new_rollouts or use_synthetic_teacher:
-            # print('Collecting validation rollouts ...')
-            self.num_timesteps = 0
-            self._episode_num = 0
-            print(f'Collecting validation pairs: {int(train_pair_indices.shape[0] * val_ratio)} pairs')
-            val_strategy = self._setup_sampling_strategy(int(train_pair_indices.shape[0] * val_ratio))
-            _, val_pair_indices = self.collect_rollouts(
-                self.env,
-                callback,
-                self.val_buffer,
-                episode_num=int(episode_num * val_ratio),
-                strategy=val_strategy,
-                verbose=1,
-            )
+        # print('Collecting validation rollouts ...')
+        self.num_timesteps = 0
+        self._episode_num = 0
+        print(f'Collecting validation pairs: {int(train_pair_indices.shape[0] * val_ratio)} pairs')
+        val_strategy = self._setup_sampling_strategy(int(train_pair_indices.shape[0] * val_ratio))
+        _, val_pair_indices = self.collect_rollouts(
+            self.env,
+            callback,
+            self.val_buffer,
+            episode_num=int(episode_num * val_ratio),
+            strategy=val_strategy,
+            verbose=1,
+        )
         collect_end_time = time.time()
 
-        if generate_new_rollouts or use_synthetic_teacher:
-            if self.verbose>0: print('Preparing preference pair data ...')
-            # Prepare pair data for training and validation
-            self.preference_buffer.prepare_pair_data(train_pair_indices, teacher=self.teacher)
-            self.val_buffer.prepare_pair_data(val_pair_indices, teacher=self.teacher)
-            if not use_synthetic_teacher:
-                # Save the collected preference data for future use [HUMAN FEEDBACK]
-                self.save_preference_data('path_to_save_data')  # TODO: specify the path
-        else:
-            print('Using saved preference pair data ...')
-            train_data, val_data = self.load_preference_data('path_to_saved_data')  # TODO: specify the path
-            self.preference_buffer.prepare_pair_data(pair_indices=train_data['pair_indices'], 
-                                                     pair_mask=train_data['pair_mask'], 
-                                                     pair_labels=train_data['pair_labels']
-                                                     )
-            self.val_buffer.prepare_pair_data(pair_indices=val_data['pair_indices'], 
-                                               pair_mask=val_data['pair_mask'], 
-                                               pair_labels=val_data['pair_labels']
-                                               )
+    
+        if self.verbose>0: print('Preparing preference pair data ...')
+        # Prepare pair data for training and validation
+        self.preference_buffer.prepare_pair_data(train_pair_indices, teacher=self.teacher)
+        self.val_buffer.prepare_pair_data(val_pair_indices, teacher=self.teacher)
         
         # Uploading rollout infos
         self.iteration += 1
@@ -809,6 +808,148 @@ class RewardModelTrainer(BaseAlgorithm):
         callback.on_training_end()
         return self
 
+    def load_preference_data(self, 
+                             data_path: str, 
+                             preference_path: str,
+    ) -> None:
+        data_input_path = os.path.join(data_path, "traj_data")
+        preferences_input_path = os.path.join(preference_path, "labels/preferences_raw.csv")
+
+        # Load Episode data from data_input_path
+        # Matches 'traj', then your run_id, then captures 3 digits, then '.npz'
+        pattern = re.compile(rf"^traj{self.run_id:02}(\d{{3}})\.npz$")
+        # Extract all matching IDs into a set
+        matched_files = sorted([f for f in os.listdir(data_input_path) if pattern.match(f)])
+        existing_files = np.array(matched_files)
+        episode_num = len(existing_files)
+                
+        for file_path in existing_files:
+            with np.load(os.path.join(data_input_path, file_path)) as loaded:
+                data_dict = {key: loaded[key] for key in loaded.files}
+            self.preference_buffer.add_traj(
+                traj_obs=data_dict['last_obs'],
+                traj_new_obs=data_dict['next_obs'],
+                traj_last_policy_mems=data_dict['last_policy_mems'],
+                traj_actions=data_dict['actions'],
+                traj_rewards=data_dict['rewards'],
+                traj_episode_starts=data_dict['episode_starts'],
+                traj_episode_dones=data_dict['dones'],
+            )
+        self.preference_buffer.separate_episodes()
+        self.val_buffer = copy.deepcopy(self.preference_buffer)
+
+        # Load preference data from preferences_input_path
+        preference_data = pd.read_csv(preferences_input_path, usecols=['filename', 'label']) 
+        names_series = preference_data['filename'].str.replace('.mp4', '', regex=False).str.split('_')
+        preference_data['left_traj_id'] = names_series.str[0].str.extract(rf"^traj{self.run_id:02}(\d{{3}})").astype(int)
+        preference_data['right_traj_id'] = names_series.str[1].str.extract(rf"^traj{self.run_id:02}(\d{{3}})").astype(int)
+        pair_indices = preference_data[['left_traj_id', 'right_traj_id']].to_numpy()
+        label_mapping = {
+            'Left': 0.0,
+            'Right': 1.0,
+            'Equal': 0.5
+        }
+        pair_labels = preference_data['label'].map(label_mapping).fillna(-1.0).to_numpy(dtype=np.float32)
+        pair_num = len(pair_indices)
+        val_ratio = 0.125 if pair_num > 100 else 0.25
+        val_idx = np.sort(np.random.choice(pair_num, int(pair_num * val_ratio), replace=False))
+        train_pairs_idx = np.setdiff1d(np.arange(pair_num), val_idx, assume_unique=True)
+        
+        train_pair_indices = pair_indices[train_pairs_idx]
+        train_pair_labels = pair_labels[train_pairs_idx]
+        train_pair_mask = train_pair_labels != -1.0
+
+        val_pair_indices = pair_indices[val_idx]
+        val_pair_labels = pair_labels[val_idx]
+        val_pair_mask = val_pair_labels != -1.0
+
+        train_data = {
+            'pair_indices': train_pair_indices,
+            'pair_labels': train_pair_labels,
+            'pair_mask': train_pair_mask,
+        }
+        val_data = {
+            'pair_indices': val_pair_indices,
+            'pair_labels': val_pair_labels,
+            'pair_mask': val_pair_mask,
+        }
+        return train_data, val_data, episode_num, pair_num
+
+    def learn_from_human(self, 
+                         data_path: str,
+                         preference_path: str,
+                         curr_iter: Optional[int] = None,
+                         timestep_log: int = 0,
+                         callback: MaybeCallback = None, 
+                         log_interval: int = 1, 
+                         tb_log_name: str = "CustomOnPolicyAlgorithm", 
+                         reset_num_timesteps: bool = True,
+    ) -> None:    
+        if curr_iter is None:
+            self.iteration = 0
+        else:
+            self.iteration = curr_iter
+        print('Using saved preference pair data ...')
+        self.n_envs = 1
+        self.preference_buffer.n_envs = 1
+        self.synthetic_teacher = False
+        self._setup_model()
+        train_data, val_data, episode_num, pair_num = self.load_preference_data(data_path, preference_path)
+
+        episode_num, callback = self._setup_learn(
+                                            total_timesteps = episode_num, 
+                                            callback=callback, 
+                                            reset_num_timesteps=reset_num_timesteps, 
+                                            tb_log_name=tb_log_name
+                                        )
+        self.episode_num = episode_num
+        callback.on_training_start(locals(), globals())
+
+        self.preference_buffer.prepare_pair_data(pair_indices=train_data['pair_indices'], 
+                                                 pair_mask=train_data['pair_mask'], 
+                                                 pair_labels=train_data['pair_labels'],
+                                                 teacher=None,
+                                                 debug=True,
+                                                )
+        self.val_buffer.prepare_pair_data(pair_indices=val_data['pair_indices'], 
+                                          pair_mask=val_data['pair_mask'], 
+                                          pair_labels=val_data['pair_labels'],
+                                          teacher=None,
+                                          debug=True,
+                                          )
+        
+        # Uploading rollout infos
+        self.iteration += 1
+        self._update_current_progress_remaining(self.num_timesteps, episode_num)
+        
+        # Deletes the collected trajectories from memory.
+        self.preference_buffer.print_memory_footprint('Prefeference Buffer')
+        self.val_buffer.print_memory_footprint('Validation Buffer  ')
+        self.preference_buffer.free_space()
+        self.val_buffer.free_space()
+        self.preference_buffer.print_memory_footprint('Prefeference Buffer')
+        self.val_buffer.print_memory_footprint('Validation Buffer  ')
+
+        self.verbose=1
+        # Train the reward model
+        train_start_time = time.time()
+        epochs_completed, best_val_loss = self.train(timestep_log=timestep_log)
+        train_end_time = time.time()
+        
+        # Print to the console
+        rews = [ep_info["r"] for ep_info in self.ep_info_buffer]
+        rew_mean = 0.0 if len(rews) == 0 else np.mean(rews)
+        print(f'--RM-- '
+              f'run: {self.run_id:2d}, '
+              f'iters: {self.iteration}, '
+              f'frames: {self.num_timesteps}, '
+              f'eps: {episode_num}, '
+              f'pairs: {pair_num}, '
+              f'epochs: {epochs_completed}/{self.reward_epochs}, '
+              f'bestval: {best_val_loss:.6f}, '
+              f'train: {train_end_time - train_start_time:.3f} sec')
+        callback.on_training_end()
+
     def add_rl_policy_models(self, rl_policy: ActorCriticPolicy, use_model_rnn: bool) -> None:
         rl_policy.eval()
         self.rl_policy = rl_policy
@@ -816,7 +957,7 @@ class RewardModelTrainer(BaseAlgorithm):
         #                                    rl_policy.model_rnn_extractor, 
         #                                    use_model_rnn)
 
-    def train(self) -> None:
+    def train(self, timestep_log: int) -> None:
         # Log training stats per each iteration
         self.training_stats = StatisticsLogger(mode='train')
     
@@ -862,6 +1003,7 @@ class RewardModelTrainer(BaseAlgorithm):
 
             # --- Logging ---
             log_data = {
+                "time/total_timesteps": timestep_log,
                 "time/epochs": epoch + 1,
                 "train/loss": avg_train_loss,
                 "val/loss": avg_val_loss,

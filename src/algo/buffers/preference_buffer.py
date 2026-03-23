@@ -88,7 +88,7 @@ class PreferenceBuffer(BaseBuffer):
         self.observations = np.zeros((self.buffer_size, self.n_envs) + self.obs_shape, dtype=np.float32)
         self.new_observations = np.zeros((self.buffer_size, self.n_envs) + self.obs_shape, dtype=np.float32)
         self.last_policy_mems = np.zeros((self.buffer_size, self.n_envs, self.gru_layers, self.dim_policy_traj), dtype=np.float32)
-        self.last_model_mems = np.zeros((self.buffer_size, self.n_envs, self.gru_layers, self.dim_model_traj), dtype=np.float32)
+        # self.last_model_mems = np.zeros((self.buffer_size, self.n_envs, self.gru_layers, self.dim_model_traj), dtype=np.float32)
         self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32)
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.intrinsic_rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
@@ -98,19 +98,6 @@ class PreferenceBuffer(BaseBuffer):
             self.curr_key_status = np.zeros((self.buffer_size, self.n_envs), dtype=np.int32)
             self.curr_door_status = np.zeros((self.buffer_size, self.n_envs), dtype=np.int32)
             self.curr_target_dists = np.zeros((self.buffer_size, self.n_envs, 3), dtype=np.float32)
-        # self.temp_observations = np.zeros((self.buffer_size * self.n_envs,) + self.obs_shape, dtype=np.float32)
-        # self.temp_new_observations = np.zeros((self.buffer_size * self.n_envs,) + self.obs_shape, dtype=np.float32)
-        # self.temp_last_policy_mems = np.zeros((self.buffer_size * self.n_envs, self.gru_layers, self.dim_policy_traj), dtype=np.float32)
-        # self.temp_last_model_mems = np.zeros((self.buffer_size * self.n_envs, self.gru_layers, self.dim_model_traj), dtype=np.float32)
-        # self.temp_actions = np.zeros((self.buffer_size * self.n_envs, self.action_dim), dtype=np.float32)
-        # self.temp_rewards = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.float32)
-        # self.temp_intrinsic_rewards = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.float32)
-        # self.temp_episode_starts = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.float32)
-        # self.temp_episode_dones = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.float32)
-        # if self.use_status_predictor:
-        #     self.temp_curr_key_status = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.int32)
-        #     self.temp_curr_door_status = np.zeros((self.buffer_size * self.n_envs, 1), dtype=np.int32)
-        #     self.temp_curr_target_dists = np.zeros((self.buffer_size * self.n_envs, 3), dtype=np.float32)
         # self.generator_ready = False
         super(PreferenceBuffer, self).reset()
     
@@ -138,7 +125,7 @@ class PreferenceBuffer(BaseBuffer):
         self.observations[self.pos] = np.array(obs).copy()
         self.new_observations[self.pos] = np.array(new_obs).copy()
         self.last_policy_mems[self.pos] = last_policy_mem.clone().cpu().numpy()
-        self.last_model_mems[self.pos] = last_model_mem.clone().cpu().numpy()
+        # self.last_model_mems[self.pos] = last_model_mem.clone().cpu().numpy()
         self.actions[self.pos] = np.array(action).copy()
         self.rewards[self.pos] = np.array(reward).copy()
         self.intrinsic_rewards[self.pos] = np.array(intrinsic_reward).copy()
@@ -154,9 +141,36 @@ class PreferenceBuffer(BaseBuffer):
             self.full = True
 
 
+    def add_traj(
+        self,
+        traj_obs: np.ndarray,
+        traj_new_obs: np.ndarray,
+        traj_last_policy_mems: np.ndarray,
+        traj_actions: np.ndarray,
+        traj_rewards: np.ndarray,
+        traj_episode_starts: np.ndarray,
+        traj_episode_dones: np.ndarray,
+    ) -> None:
+        n_traj = traj_obs.shape[0]
+        for i in range(n_traj):
+            self.add(
+                obs=traj_obs[i],
+                new_obs=traj_new_obs[i],
+                last_policy_mem= th.as_tensor(traj_last_policy_mems[i], dtype=th.float32, device=self.device),
+                last_model_mem= None, # placeholder
+                action=traj_actions[i],
+                reward=traj_rewards[i],
+                intrinsic_reward=0.0, # placeholder
+                episode_start=traj_episode_starts[i],
+                episode_done=traj_episode_dones[i],
+                curr_key_status=None, # placeholder
+                curr_door_status=None, # placeholder
+                curr_target_dist=None, # placeholder
+            )
+
+
     def get(self, batch_size: Optional[int] = None) -> Generator[PreferenceBufferSamples, None, None]:
-        # print(f'Collected {self.pos}/{self.buffer_size} steps. {self.episode_dones.sum().item()} episodes.')
-        num_generated_pairs = self.labels_tensor.shape[0]
+        num_generated_pairs = self.labels_array.shape[0]
 
         if batch_size is None:
             batch_size = min(num_generated_pairs // 4, 64) # 64 pairs per batch or 4 minibatches
@@ -171,20 +185,21 @@ class PreferenceBuffer(BaseBuffer):
             yield self._get_samples(indices[start_idx:start_idx + batch_size])
             start_idx += batch_size
 
+
     def _get_samples(self, batch_inds: np.ndarray) -> PreferenceBufferSamples:
         data1 = TrajectoryData( 
-            curr_obs=self.obs1_tensor[batch_inds],
-            actions=self.acts1_tensor[batch_inds],
-            last_mems=self.mems1_tensor[batch_inds],
+            curr_obs=th.tensor(self.obs1_array[batch_inds], dtype=th.float32).to(self.device),
+            actions=th.tensor(self.acts1_array[batch_inds], dtype=th.float32).to(self.device),
+            last_mems=th.tensor(self.mems1_array[batch_inds], dtype=th.float32).to(self.device),
         )
 
         data2 = TrajectoryData(
-            curr_obs=self.obs2_tensor[batch_inds],
-            actions=self.acts2_tensor[batch_inds],
-            last_mems=self.mems2_tensor[batch_inds],
+            curr_obs=th.tensor(self.obs2_array[batch_inds], dtype=th.float32).to(self.device),
+            actions=th.tensor(self.acts2_array[batch_inds], dtype=th.float32).to(self.device),
+            last_mems=th.tensor(self.mems2_array[batch_inds], dtype=th.float32).to(self.device),
         )
 
-        labels = self.labels_tensor[batch_inds]
+        labels = th.tensor(self.labels_array[batch_inds], dtype=th.float32).to(self.device)
 
         return PreferenceBufferSamples(data1=data1, data2=data2, labels=labels)
 
@@ -368,25 +383,37 @@ class PreferenceBuffer(BaseBuffer):
         r_t_2, mask2 = pad_to_max_length(r_t_2)
         pair_ids = np.array(pair_ids)
 
-        # Initialize labels as -1 for all new pairs
-        labels = np.full(len(pair_ids), -1, dtype=float)
-
         if self.synthetic_teacher:
+            # Initialize labels as -1 for all new pairs
+            labels = np.full(len(pair_ids), -1, dtype=float)
             # --- Generate synthetic preferences only for unlabeled pairs ---
             pair_mask, pair_labels = self._generate_synthetic_preferences(pair_ids, r_t_1, r_t_2, mask1, mask2, labels, teacher, debug=debug)
             # TODO: if using iterative pairing algorithm like swiss tournament we need to generate more samples and label them here
         
-        labels[pair_mask] = pair_labels
-        # --- Convert all to tensors on device ---
-        self.obs1_tensor = th.tensor(obs1_padded, dtype=th.float32).to(self.device)
-        self.obs2_tensor = th.tensor(obs2_padded, dtype=th.float32).to(self.device)
-        self.acts1_tensor = th.tensor(acts1_padded, dtype=th.float32).to(self.device)
-        self.acts2_tensor = th.tensor(acts2_padded, dtype=th.float32).to(self.device)
-        self.mems1_tensor = th.tensor(mems1_padded, dtype=th.float32).to(self.device)
-        self.mems2_tensor = th.tensor(mems2_padded, dtype=th.float32).to(self.device)
-        self.r_t_1_tensor = th.tensor(r_t_1, dtype=th.float32).to(self.device)
-        self.r_t_2_tensor = th.tensor(r_t_2, dtype=th.float32).to(self.device)
-        self.labels_tensor = th.tensor(labels, dtype=th.float32).to(self.device)
+            labels[pair_mask] = pair_labels
+        else: 
+            # If pairs_mask has any False value which means invalid pairs (label=-1), raise an error since we cannot train on them
+            if pair_mask is not None and not pair_mask.all():
+                raise ValueError("Invalid pairs found in the preference data.")
+            labels = pair_labels
+    
+        self.obs1_array = obs1_padded.copy()
+        self.obs2_array = obs2_padded.copy()
+        self.acts1_array = acts1_padded.copy()
+        self.acts2_array = acts2_padded.copy()
+        self.mems1_array = mems1_padded.copy()
+        self.mems2_array = mems2_padded.copy()
+        self.labels_array = labels.copy()
+
+        # # # --- Convert all to tensors on device ---
+        # self.obs1_tensor = th.tensor(obs1_padded, dtype=th.float32).to(self.device)
+        # self.obs2_tensor = th.tensor(obs2_padded, dtype=th.float32).to(self.device)
+        # self.acts1_tensor = th.tensor(acts1_padded, dtype=th.float32).to(self.device)
+        # self.acts2_tensor = th.tensor(acts2_padded, dtype=th.float32).to(self.device)
+        # self.mems1_tensor = th.tensor(mems1_padded, dtype=th.float32).to(self.device)
+        # self.mems2_tensor = th.tensor(mems2_padded, dtype=th.float32).to(self.device)
+        # self.labels_tensor = th.tensor(labels, dtype=th.float32).to(self.device)
+
 
     def _generate_synthetic_preferences(self, pair_ids, r_t_1, r_t_2, mask1, mask2, labels, teacher: dict, debug: bool=False) -> None:
         """
@@ -455,3 +482,47 @@ class PreferenceBuffer(BaseBuffer):
                 print(f"  Label {lbl}: {cnt} ({100*cnt/len(labels):.1f}%)")
         return pair_mask, labels
         
+
+    def print_memory_footprint(self, name: Optional[str] = None) -> None:
+        """Calculates and prints the RAM and VRAM usage of the object's arrays/tensors."""
+        ram_bytes = 0
+        vram_bytes = 0
+        
+        # vars(self) gets a dictionary of all the object's attributes
+        for item in vars(self).values():
+            if isinstance(item, th.Tensor):
+                mem = item.element_size() * item.nelement()
+                if item.is_cuda:
+                    vram_bytes += mem
+                else:
+                    ram_bytes += mem
+                    
+            elif isinstance(item, np.ndarray):
+                ram_bytes += item.nbytes
+                
+        ram_mb = ram_bytes / (1024 ** 2)
+        vram_mb = vram_bytes / (1024 ** 2)
+        
+        # self.__class__.__name__ automatically prints the actual name of your class
+        print(f"[{name or self.__class__.__name__}] Memory] RAM: {ram_mb:.2f} MB | GPU VRAM: {vram_mb:.2f} MB")
+        
+        return ram_mb, vram_mb
+
+
+    def free_space(self):
+        del self.observations
+        del self.new_observations
+        del self.last_policy_mems
+        # del self.last_model_mems
+        del self.actions
+        del self.rewards
+        del self.intrinsic_rewards
+        del self.episode_starts
+        del self.episode_dones
+        if self.use_status_predictor:
+            del self.curr_key_status
+            del self.curr_door_status
+            del self.curr_target_dists
+        self.episode_ids
+        self.episode_index
+        self.episode_envs
