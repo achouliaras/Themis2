@@ -192,7 +192,7 @@ class XplainMethod(Enum):
                 return XplainMethod.Deconvolution
             if method in ['integratedgradients', 'integrated_gradients', 'intgradients']:
                 return XplainMethod.IntegratedGradients
-            if method in ['deeplift']:
+            if method in ['deeplift', 'deep_lift']:
                 return XplainMethod.DeepLift
             if method in ['gradientshap', 'gradient_shap']:
                 return XplainMethod.GradientSHAP
@@ -202,6 +202,6 @@ class XplainMethod(Enum):
                 return XplainMethod.GradCAM
             if method in ['smoothsaliency', 'smooth_saliency']:
                 return XplainMethod.SmoothSaliency
-            if method in ['smoothintegratedgradients', 'smooth_integrated_gradients', 'smoothintgradients']:
+            if method in ['smoothintegratedgradients', 'smooth_integrated_gradients', 'smoothintgradients', 'smooth_ig', 'smoothintegratedgrads', 'smooth_integrated_grads', 'smoothig']:
                 return XplainMethod.SmoothIntegratedGradients
         raise ValueError

@@ -352,6 +352,6 @@ class PPOTrainer(PPORollout):
     def save(self, path: str) -> None:
         super(PPOTrainer, self).save(path, include=["run_id"])
 
-    def load(self, path: str, device: th.device) -> None:
-        return super(PPOTrainer, self).load(path, device=device)
+    # def load(self, load_path: str, device: th.device) -> None:
+    #     return super(PPOTrainer, self).load(load_path, device=device)
     

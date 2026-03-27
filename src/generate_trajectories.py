@@ -17,7 +17,7 @@ from src.algo.ppo_model import PPOModel
 from src.algo.ppo_trainer import PPOTrainer
 from src.utils.configs import TrainingConfig
 from src.utils.enum_types import EnvSrc, XplainMethod
-from src.utils.xai_utils import fetch_captum_explainer, generate_attribution_map
+from src.utils.xai_utils import ValueNetworkWrapper, fetch_captum_explainer, generate_attribution_map
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.utils import obs_as_tensor
 
@@ -208,21 +208,9 @@ def generate_trajectories(config):
         dones = np.zeros(current_batch_size, dtype=bool)
         dones_target = np.zeros(current_batch_size, dtype=bool) # To track which environments have reached done=True at least once
         if config.gen_xai_videos:
-            def forward_wrapper(obs_in, policy_mems_in, actions_in):
-                # 1. Pass the observation through the feature extractor
-                latent_pi, _, _ = model.policy.extract_features(obs_in, policy_mems_in)
-                
-                # 2. Generate the action distribution (logits/probs)
-                distribution = model.policy._get_action_dist_from_latent(latent_pi)
-                
-                # 3. CRITICAL: Calculate the log_prob of the ALREADY TAKEN actions
-                # Do not sample new actions!
-                log_probs = distribution.log_prob(actions_in)
-                # Return shape is (Batch, )
-                return log_probs
-            
+            wrapped_model = ValueNetworkWrapper(model, config.xai_network)
             xai_method = XplainMethod.get_enum_xplain_method(config.xai_method)
-            xplainer = fetch_captum_explainer(xai_method, forward_wrapper, model, kwargs=xai_kwargs) # Initialize the Captum explainer with the custom wrapper
+            xplainer = fetch_captum_explainer(xai_method, wrapped_model, model, kwargs=xai_kwargs) # Initialize the Captum explainer with the custom wrapper
 
         for step in range(config.video_length):
             with th.no_grad():
@@ -388,6 +376,7 @@ def generate_trajectories(config):
 @click.option('--video_length', default=100, type=int, help='Max length of the video (frames)')
 @click.option('--gen_xai_videos', default=False, type=bool, help='Whether to generate XAI videos saliency maps of policy predictions')
 @click.option('--xai_method', default='saliency', type=str, help='Method for generating XAI videos saliency maps of policy predictions')
+@click.option('--xai_network', default='value', type=str, help='Network for generating XAI videos saliency maps of policy predictions: [value|policy]')
 @click.option('--traj_overwrite', default=True, type=bool, help='Whether the generated trajectories should overwrite existing ones in the log directory (if 0, trajectories will be saved with an incremental index)')
 @click.option('--record_video', default=0, type=int, help='Whether the environment should be wrapped in a video recorder (don\'t use for human feedback setting)')
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
@@ -399,7 +388,7 @@ def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_
          use_model_rnn, 
          latents_dim, model_latents_dim, policy_cnn_type, policy_mlp_layers, policy_cnn_norm, policy_mlp_norm, policy_gru_norm, model_cnn_type, 
          model_mlp_layers, model_cnn_norm, model_mlp_norm, model_gru_norm, activation_fn, cnn_activation_fn, gru_layers, optimizer, 
-         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, chunk_size, fps, video_length, gen_xai_videos, xai_method,
+         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, chunk_size, fps, video_length, gen_xai_videos, xai_method, xai_network,
          traj_overwrite, record_video, env_render):
     
     set_random_seed(run_id, using_cuda=True)

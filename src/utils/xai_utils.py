@@ -1,5 +1,6 @@
 import numpy as np
 import torch as th
+import torch.nn as nn
 import cv2
 from stable_baselines3.common.utils import obs_as_tensor
 from src.utils.enum_types import XplainMethod
@@ -9,6 +10,27 @@ from captum.attr import (
     LayerGradCam, NoiseTunnel, LayerAttribution
 )
 
+class ValueNetworkWrapper(nn.Module):
+    def __init__(self, sb3_model, explain_model='value'):
+        super(ValueNetworkWrapper, self).__init__()
+        # Store the SB3 model as a submodule so Captum can find its layers
+        self.sb3_model = sb3_model
+        self.explain_model = explain_model
+        
+    def forward(self, obs_in, policy_mems_in, actions_in=None):
+        # 1. Pass the observation through the feature extractor
+        latent_pi, latent_vf, _ = self.sb3_model.policy.extract_features(obs_in, policy_mems_in)
+        # 2. Predict the Value of the current state and action distribution (logits/probs)
+        if self.explain_model == 'value':
+            values = self.sb3_model.policy.value_net(latent_vf)
+            return values.squeeze(-1)
+        elif self.explain_model == 'action':
+            distribution = self.sb3_model.policy._get_action_dist_from_latent(latent_pi)
+            log_probs = distribution.log_prob(actions_in)
+            return log_probs
+        else:
+            raise ValueError(f"Unsupported explanation model: {self.explain_model}")
+    
 def fetch_captum_explainer(enum_method, wrapper, model=None, kwargs=None):
     kwargs = kwargs or {}
     if enum_method == XplainMethod.Saliency:
@@ -130,19 +152,17 @@ def generate_attribution_map(observations, policy_mems, actions, env, device, xp
     # Convert the rollout actions to a tensor so we can evaluate them
     actions_tensor = th.as_tensor(actions, device=device)
 
-    # ==========================================
-    # THE CUSTOM CAPTUM WRAPPER
-    # ==========================================
-
     # Because our wrapper returns a 1D tensor of log_probs (one specific scalar per batch item),
     # Captum knows exactly what to differentiate. We no longer need to pass 'target'.
     grads = fetch_attribution(xai_method, xplainer, obs_tensor, policy_mems, actions_tensor)
 
     # Convert to numpy (Batch, Channels, Height, Width)
-    grads_np = np.abs(grads.cpu().detach().numpy())
+    # grads_np = np.abs(grads.cpu().detach().numpy())
+    grads_np = grads.cpu().detach().numpy()
     
     # Collapse channels by taking the max gradient per pixel -> (Batch, Height, Width)
-    saliency_batch = np.max(grads_np, axis=1)
+    # saliency_batch = np.max(grads_np, axis=1)
+    saliency_batch = np.sum(grads_np, axis=1)
     
     # 4. Fetch vectorized environment attributes
     # Standard way to get variables from a stable-baselines3 or gym3 VecEnv
@@ -185,34 +205,54 @@ def generate_attribution_map(observations, policy_mems, actions, env, device, xp
             tile_size=tile_size # Fallback to 8 if not in config
         )
         
-        # Normalize to [0, 255]
-        if global_saliency.max() > 0:
-            global_saliency = (global_saliency - global_saliency.min()) / (global_saliency.max() - global_saliency.min() + 1e-8)
+        # # POSITIVE NORMALIZATION to [0, 255]
+        # if global_saliency.max() > 0:
+        #     global_saliency = (global_saliency - global_saliency.min()) / (global_saliency.max() - global_saliency.min() + 1e-8)
+        # global_saliency = np.uint8(global_saliency * 255)
         
-        global_saliency_uint8 = np.uint8(global_saliency * 255)
-        
-        # Scale up to the high-res render dimensions
-        saliency_resized = cv2.resize(global_saliency_uint8, (render_w, render_h), interpolation=cv2.INTER_NEAREST)
-        
-        # Apply colormap
-        heatmap = cv2.applyColorMap(saliency_resized, cv2.COLORMAP_JET)
-        
-        # Mask and Blend
-        mask = saliency_resized > 0
+        # SYMMETRIC NORMALIZATION (Keeps 0 at 0)
+        # Find the absolute maximum so we can scale everything between -1.0 and 1.0
+        max_abs_val = np.max(np.abs(global_saliency))
+        if max_abs_val > 1e-8:
+            global_saliency = global_saliency / max_abs_val
+        else:
+            global_saliency = global_saliency
 
-        # Original video frames underneath.
+        # Scale up to the high-res render dimensions
+        saliency_resized = cv2.resize(global_saliency, (render_w, render_h), interpolation=cv2.INTER_NEAREST)
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        blended = frame_bgr.copy()
-        # Blend only where the agent is looking (80% original, 20% heatmap)
-        blended[mask] = cv2.addWeighted(frame_bgr, 0.8, heatmap, 0.2, 0)[mask]
         
-        # # Create a pure black canvas
-        # blended = np.zeros((render_h, render_w, 3), dtype=np.uint8)
-        # # Apply the heatmap directly to the black canvas where the mask is active
-        # blended[mask] = heatmap[mask]
+        # # Apply colormap
+        # heatmap = cv2.applyColorMap(saliency_resized, cv2.COLORMAP_JET)
+        
+        # # Mask and Blend
+        # mask = saliency_resized > 0
+
+        # # Original video frames underneath.
+        # blended = frame_bgr.copy()
+        # # Blend only where the agent is looking (80% original, 20% heatmap)
+        # blended[mask] = cv2.addWeighted(frame_bgr, 0.8, heatmap, 0.2, 0)[mask]
+        
+        # Alpha is the absolute magnitude (0.0 to 1.0). Scale by 0.6 for max opacity.
+        alpha = np.abs(saliency_resized)[..., np.newaxis] * 0.5
+        
+        # Create solid BGR canvases
+        red_canvas = np.zeros_like(frame_bgr)
+        red_canvas[:] = [0, 0, 255]   # Pure Red for positive
+        
+        blue_canvas = np.zeros_like(frame_bgr)
+        blue_canvas[:] = [255, 0, 0]  # Pure Blue for negative
+        
+        # Create boolean masks for positive and negative regions
+        pos_mask = (saliency_resized > 0)[..., np.newaxis]
+        neg_mask = (saliency_resized < 0)[..., np.newaxis]
+        
+        # Blend mathematically
+        blended = frame_bgr * (1.0 - alpha)                           # Darken original frame where alpha is high
+        blended += np.where(pos_mask, red_canvas * alpha, 0)          # Add red to positive areas
+        blended += np.where(neg_mask, blue_canvas * alpha, 0)         # Add blue to negative areas
 
         # Convert back to RGB for video writers like imageio or wandb
-        blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+        blended_rgb = cv2.cvtColor(blended.astype(np.uint8), cv2.COLOR_BGR2RGB)
         blended_frames.append(blended_rgb)
-        
     return blended_frames

@@ -82,7 +82,7 @@ def train(config):
         aegis_dst_momentum=config.aegis_knn_k,
     )
 
-    model = PPOTrainer(
+    trainer_kwargs = dict(
         policy=PPOModel,
         env=venv,
         seed=config.run_id,
@@ -128,9 +128,6 @@ def train(config):
         verbose=0,
     )
 
-    if config.run_id == 0:
-        print('model.policy:', model.policy)
-
     pretrain_steps = int(config.total_steps * config.pretrain_percentage)
     train_steps = config.total_steps - pretrain_steps
 
@@ -141,6 +138,11 @@ def train(config):
         if not matching_files:
             print('Model not found. Pretraining ...') 
             config.local_logger.flush_all()
+            model = PPOTrainer(
+                **trainer_kwargs
+            )
+            if config.run_id == 0:
+                print('model.policy:', model.policy)
             model.pretrain_mode()
             model.learn(total_timesteps=pretrain_steps, callback=callbacks)
             num_timesteps_completed = model.num_timesteps
@@ -158,7 +160,7 @@ def train(config):
                 if not train_matching_files:
                     raise ValueError(f"Training model checkpoint not found for resuming training at iteration {config.curr_iter}. Expected at least one file matching: {search_pattern}")
                 latest_model_path = max(train_matching_files, key=os.path.getmtime)
-                model.load(path=latest_model_path, device=config.device)
+                model = PPOTrainer.load(load_path=latest_model_path, **trainer_kwargs)
                 match = re.search(r'train_model_(\d+)', os.path.basename(latest_model_path))
                 if match:
                     num_timesteps_completed = int(match.group(1))
@@ -168,7 +170,7 @@ def train(config):
             else:
                 # Load latest pretrained model checkpoint.
                 latest_model_path = max(matching_files, key=os.path.getmtime)
-                model.load(path=latest_model_path, device=config.device)
+                model = PPOTrainer.load(load_path=latest_model_path, **trainer_kwargs)
                 match = re.search(r'pretrain_model_(\d+)', os.path.basename(latest_model_path))
                 if match:
                     num_timesteps_completed = int(match.group(1))
@@ -317,7 +319,7 @@ def train(config):
 @click.option('--reward_learning_rate', default=3e-2, type=float, help='Learning rate of Reward Model')
 @click.option('--reward_ensemble_size', default=3, type=int, help='Number of models in the Reward Model ensemble')
 @click.option('--reward_activation_fn', default='relu', type=str, help='Activation function for Reward Model')
-# Reward params
+# Intrinsic Reward params
 @click.option('--ext_rew_coef', default=1.0, type=float, help='Coefficient of extrinsic rewards')
 @click.option('--ext_rew_pretrain_coef', default=0.0, type=float, help='Coefficient of extrinsic rewards during pretraining')
 @click.option('--int_rew_coef', default=1e-2, type=float, help='Coefficient of intrinsic rewards (IRs)')

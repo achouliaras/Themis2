@@ -429,12 +429,14 @@ class PPORollout(BaseAlgorithm):
 
             if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
                 log_data.update({
+                    "rollout/ep_info_rew_mean": safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]),
                     "rollout/ep_info_true_rew_mean": safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]),
                     "rollout/ep_info_len_mean": safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]),
                 })
             else:
                 log_data.update({
                     "rollout/ep_info_rew_mean": 0.0,
+                    "rollout/ep_info_true_rew_mean": 0.0,
                     "rollout/ep_info_len_mean": np.nan,
                 })
 
@@ -836,30 +838,71 @@ class PPORollout(BaseAlgorithm):
             train_end_time = time.time()
 
             # Print to the console
-            rews = [ep_info["r"] for ep_info in self.ep_info_buffer]
-            rew_mean = 0.0 if len(rews) == 0 else np.mean(rews)
+            rew_mean = self.rollout_sum_rewards / (self.rollout_done_episodes + 1e-8)
+            true_rew_mean = self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8)
             print(f'--RL-- '
                   f'run: {self.run_id:2d}, '
                   f'iters: {self.iteration}, '
                   f'frames: {self.num_timesteps}, '
                   f'rew: {rew_mean:.6f}, '
-                  f'true_rew: {self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8):.6f}, '
+                  f'true_rew: {true_rew_mean:.6f}, '
                   f'rollout: {collect_end_time - collect_start_time:.3f} sec, '
                   f'train: {train_end_time - train_start_time:.3f} sec')
         callback.on_training_end()
         return self
 
-    def save(self, save_path: str, include: Optional[Iterable[str]] = None) -> None:
-        super().save(save_path, include=include, exclude=["episodic_obs_emb_history", "episodic_trj_emb_history"])
-
-    def load(self, load_path: str, device: th.device, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None) -> None:
-        def float_zeros(tensor_shape):
-            return th.zeros(tensor_shape, device=self.device, dtype=th.float32)
+    def _get_torch_save_params(self):
+        """
+        Overrides the default save behavior to ensure the custom 
+        intrinsic reward models and RNNs are included in the .zip file.
+        """
+        # Get the standard PPO policy parameters
+        state_dicts, pytorch_variables = super()._get_torch_save_params()
         
-        custom_objects = {
-            "episodic_obs_emb_history": None,
-            "episodic_trj_emb_history": None,
-            "_last_policy_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_policy_features]),
-            "_last_model_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_model_features]),
-        }
-        return super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)
+        # Tell SB3 to save the intrinsic reward model!
+        if hasattr(self, 'policy.int_rew_model'):
+            state_dicts.append('policy.int_rew_model')
+            
+        # Also ensure your custom RNNs are saved, just in case!
+        if hasattr(self, 'policy.policy_rnns'):
+            state_dicts.append('policy.policy_rnns')
+            
+        return state_dicts, pytorch_variables
+    
+    def save(self, save_path: str, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None,) -> None:
+        include_list = list(include) if include is not None else []
+        include_list.extend([
+            "episodic_obs_emb_history", 
+            "episodic_trj_emb_history", 
+            "_last_policy_mems", 
+            "_last_model_mems"
+        ])
+        super().save(save_path, include=include_list, exclude=exclude)
+
+    @classmethod
+    def load(cls, load_path: str, env=None, device="auto", custom_objects=None, **kwargs):
+        # Note: If you uncomment custom_objects to inject zeros, you will overwrite 
+        # the memories you just saved! Only use custom_objects if you are changing 
+        # self.n_envs between pretraining and training and need to reshape the arrays.
+        
+        # We let SB3's BaseAlgorithm load everything automatically
+        model = super().load(
+            load_path, 
+            env=env, 
+            device=device, 
+            custom_objects=custom_objects, 
+            **kwargs
+        )
+        return model
+    
+    # def load(self, load_path: str, device: th.device, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None) -> None:
+    #     def float_zeros(tensor_shape):
+    #         return th.zeros(tensor_shape, device=self.device, dtype=th.float32)
+    #     custom_objects = None
+    #     # custom_objects = {
+    #     #     "episodic_obs_emb_history": [None for _ in range(self.n_envs)],
+    #     #     "episodic_trj_emb_history": [None for _ in range(self.n_envs)],
+    #     #     "_last_policy_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_policy_features]),
+    #     #     "_last_model_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_model_features]),
+    #     # }
+    #     return super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)

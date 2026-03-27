@@ -163,8 +163,8 @@ class VideoFramework:
     def start(self, max_workers=8):
         # Start listening for webhooks immediately
         start_webhook_listener(port=WEBHOOK_PORT)
-        if self.config.notifications:
-            notify_new_iteration_started(self.config.exp_group_name, first=(self.config.curr_iter==0))
+        # if self.config.notifications:
+        #     notify_new_iteration_started(self.config.exp_group_name, first=(self.config.curr_iter==0))
         while True:
             start_time = time.perf_counter()
             # 1. Ask Sampler for pairs
