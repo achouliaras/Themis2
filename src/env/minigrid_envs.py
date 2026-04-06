@@ -65,7 +65,9 @@ class BlockedUnlockPickupEnv(RoomGrid):
     """
 
     def __init__(self, max_steps: int | None = None, **kwargs):
-        mission_space = MissionSpace(mission_func=self._gen_mission)
+        mission_space = MissionSpace(
+            mission_func=self._gen_mission,
+        )
 
         room_size = 6
         if max_steps is None:
@@ -87,33 +89,18 @@ class BlockedUnlockPickupEnv(RoomGrid):
     def _gen_grid(self, width, height):
         super()._gen_grid(width, height)
 
-        # Make sure the two rooms are directly connected by a locked door
-        door, pos = self.add_door(0, 0, 0, locked=True)
-        
-        # Add a key to unlock the door
-        self.add_object(0, 0, "key", door.color)
-
         # Place a goal in the room on the right
         obj, goal_pos = self.place_in_room(1, 0, Goal())
         self.goal_pos = goal_pos
-
+        # Make sure the two rooms are directly connected by a locked door
+        door, pos = self.add_door(0, 0, 0, locked=True)
         # Block the door with a ball
         color = self._rand_color()
         self.grid.set(pos[0] - 1, pos[1], Ball(color))
+        # Add a key to unlock the door
+        self.add_object(0, 0, "key", door.color)
 
         self.place_agent(0, 0)
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = super().step(action)
-
-        info["true_reward"] = 0
-
-        if tuple(self.agent_pos) == tuple(self.goal_pos):
-            info["true_reward"] = self._reward()
-            reward = self._reward()
-            terminated = True
-
-        return obs, reward, terminated, truncated, info
 
 register(
     id='MiniGrid-BlockedUnlockPickup-v0',

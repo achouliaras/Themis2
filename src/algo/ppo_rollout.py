@@ -894,15 +894,3 @@ class PPORollout(BaseAlgorithm):
             **kwargs
         )
         return model
-    
-    # def load(self, load_path: str, device: th.device, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None) -> None:
-    #     def float_zeros(tensor_shape):
-    #         return th.zeros(tensor_shape, device=self.device, dtype=th.float32)
-    #     custom_objects = None
-    #     # custom_objects = {
-    #     #     "episodic_obs_emb_history": [None for _ in range(self.n_envs)],
-    #     #     "episodic_trj_emb_history": [None for _ in range(self.n_envs)],
-    #     #     "_last_policy_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_policy_features]),
-    #     #     "_last_model_mems": float_zeros([self.n_envs, self.policy.gru_layers, self.policy.dim_model_features]),
-    #     # }
-    #     return super().load(load_path, device=device, custom_objects=custom_objects, include=include, exclude=exclude)

@@ -169,12 +169,13 @@ class XplainMethod(Enum):
     InputXGradient = 2
     GuidedBackprop = 3
     Deconvolution = 4
-    IntegratedGradients = 5
-    SmoothIntegratedGradients = 6
-    GradientSHAP = 7
-    DeepLift = 8
-    DeepLiftShap = 9
-    GradCAM = 10
+    LRP = 5
+    IntegratedGradients = 6
+    SmoothIntegratedGradients = 7
+    GradientSHAP = 8
+    DeepLift = 9
+    DeepLiftShap = 10
+    GradCAM = 11
 
     @staticmethod
     def get_enum_xplain_method(method):
@@ -192,6 +193,8 @@ class XplainMethod(Enum):
                 return XplainMethod.Deconvolution
             if method in ['integratedgradients', 'integrated_gradients', 'intgradients']:
                 return XplainMethod.IntegratedGradients
+            if method in ['lrp', 'layerwise_relevance_propagation', 'layerwise_relevance_prop', 'layerwise_relevance', 'layer_relevance_propagation', 'layer_relevance_prop', 'layer_relevance']:
+                return XplainMethod.LRP
             if method in ['deeplift', 'deep_lift']:
                 return XplainMethod.DeepLift
             if method in ['gradientshap', 'gradient_shap']:

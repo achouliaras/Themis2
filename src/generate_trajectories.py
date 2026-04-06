@@ -90,6 +90,8 @@ def generate_trajectories(config):
         run_id=config.run_id,
         n_envs=config.num_processes,
         activation_fn=activation_fn,
+        learning_rate=config.learning_rate,
+        model_learning_rate=config.model_learning_rate,
         features_extractor_class=policy_features_extractor_class,
         features_extractor_kwargs=features_extractor_common_kwargs,
         model_cnn_features_extractor_class=model_cnn_features_extractor_class,
@@ -104,12 +106,27 @@ def generate_trajectories(config):
         model_mlp_norm=config.model_mlp_norm,
         model_cnn_norm=config.model_cnn_norm,
         model_mlp_layers=config.model_mlp_layers,
+        use_status_predictor=config.use_status_predictor,
         gru_layers=config.gru_layers,
         policy_mlp_layers=config.policy_mlp_layers,
         policy_gru_norm=config.policy_gru_norm,
         use_model_rnn=config.use_model_rnn,
         model_gru_norm=config.model_gru_norm,
+        total_timesteps=config.total_steps,
         n_steps=config.n_steps,
+        int_rew_source=config.int_rew_source,
+        icm_forward_loss_coef=config.icm_forward_loss_coef,
+        ngu_knn_k=config.ngu_knn_k,
+        ngu_dst_momentum=config.ngu_dst_momentum,
+        ngu_use_rnd=config.ngu_use_rnd,
+        rnd_err_norm=config.rnd_err_norm,
+        rnd_err_momentum=config.rnd_err_momentum,
+        rnd_use_policy_emb=config.rnd_use_policy_emb,
+        dsc_obs_queue_len=config.dsc_obs_queue_len,
+        log_dsc_verbose=config.log_dsc_verbose,
+        aegis_nov_exp_mem_capacity = config.aegis_nov_exp_mem_capacity,
+        aegis_knn_k=config.aegis_knn_k,
+        aegis_dst_momentum=config.aegis_knn_k,
     )
 
     if config.gen_xai_videos:
@@ -123,17 +140,19 @@ def generate_trajectories(config):
         wrapper_class = config.get_wrapper_class()
         env = config.get_env(wrapper_class, num_processes=len(chunk), seed=config.run_id*12345 + chunk[0] if config.fixed_seed >= 0 else None)
 
-        model = PPOTrainer(
+        trainer_kwargs = dict(
             policy=PPOModel,
             env=env,
             seed=config.run_id,
-            device=config.device,
             run_id=config.run_id,
             can_see_walls=config.can_see_walls,
             image_noise_scale=config.image_noise_scale,
+            total_timesteps=config.total_steps,
             n_steps=config.n_steps,
             n_epochs=config.n_epochs,
             model_n_epochs=config.model_n_epochs,
+            learning_rate=config.learning_rate,
+            model_learning_rate=config.model_learning_rate,
             gamma=config.gamma,
             gae_lambda=config.gae_lambda,
             ent_coef=config.ent_coef,
@@ -141,7 +160,14 @@ def generate_trajectories(config):
             pg_coef=config.pg_coef,
             vf_coef=config.vf_coef,
             max_grad_norm=config.max_grad_norm,
+            ext_rew_coef=config.ext_rew_coef,
+            ext_rew_pretrain_coef=config.ext_rew_pretrain_coef,
             int_rew_source=config.int_rew_source,
+            int_rew_coef=config.int_rew_coef,
+            int_rew_norm=config.int_rew_norm,
+            int_rew_momentum=config.int_rew_momentum,
+            int_rew_eps=config.int_rew_eps,
+            int_rew_clip=config.int_rew_clip,
             adv_momentum=config.adv_momentum,
             adv_norm=config.adv_norm,
             adv_eps=config.adv_eps,
@@ -151,9 +177,15 @@ def generate_trajectories(config):
             env_source=config.env_source,
             env_render=config.env_render,
             fixed_seed=config.fixed_seed,
+            use_wandb=config.use_wandb,
+            local_logger=config.local_logger,
+            enable_plotting=config.enable_plotting,
+            plot_interval=config.plot_interval,
+            plot_colormap=config.plot_colormap,
             log_explored_states=config.log_explored_states,
             verbose=0,
         )
+        
         if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1 and config.curr_iter > 0:
             # It's Human Teacher setting and there is at least one pretrained model.
             # Load latest trained model chechpoint instead of pretrained model, to resume interrupted training.
@@ -167,7 +199,7 @@ def generate_trajectories(config):
             matching_files = glob.glob(search_pattern)
             latest_model_path = max(matching_files, key=os.path.getmtime)
 
-        model = model.load(path=latest_model_path, device=model.device) # Load the pretrained model weights for trajectory generation
+        model = PPOTrainer.load(load_path=latest_model_path, **trainer_kwargs)
         model.policy.eval() # Set the policy to evaluation mode for trajectory generation
 
         ptr_str = f"Generating trajectories {chunk[0]}-{chunk[-1]}/{config.episode_num}: "
@@ -298,6 +330,8 @@ def generate_trajectories(config):
 @click.option('--features_dim', default=64, type=int, help='Number of neurons of a learned embedding (PPO)')
 @click.option('--model_features_dim', default=128, type=int,
               help='Number of neurons of a learned embedding (dynamics model)')
+@click.option('--learning_rate', default=3e-4, type=float, help='Learning rate of PPO')
+@click.option('--model_learning_rate', default=3e-4, type=float, help='Learning rate of the dynamics model')
 @click.option('--num_processes', default=8, type=int, help='Number of training processes (workers)')
 @click.option('--batch_size', default=512, type=int, help='Batch size')
 @click.option('--n_steps', default=512, type=int, help='Number of steps to run for each process per PPO update during training')
@@ -341,10 +375,29 @@ def generate_trajectories(config):
 @click.option('--reward_learning_rate', default=3e-2, type=float, help='Learning rate of Reward Model')
 @click.option('--reward_ensemble_size', default=3, type=int, help='Number of models in the Reward Model ensemble')
 @click.option('--reward_activation_fn', default='relu', type=str, help='Activation function for Reward Model')
-# Reward params
+# Intrinsic Reward params
 @click.option('--ext_rew_coef', default=1.0, type=float, help='Coefficient of extrinsic rewards')
+@click.option('--ext_rew_pretrain_coef', default=0.0, type=float, help='Coefficient of extrinsic rewards during pretraining')
+@click.option('--int_rew_coef', default=1e-2, type=float, help='Coefficient of intrinsic rewards (IRs)')
 @click.option('--int_rew_source', default='NoModel', type=str,
               help='Source of IRs: [NoModel|AEGIS|DEIR|ICM|RND|NGU|NovelD|PlainDiscriminator|PlainInverse|PlainForward]')
+@click.option('--int_rew_norm', default=1, type=int,
+              help='Normalized IRs by: [0] No normalization [1] Standardization [2] Min-max normalization [3] Standardization w.o. subtracting the mean')
+@click.option('--int_rew_momentum', default=0.9, type=float,
+              help='EMA smoothing factor for IR normalization (-1: total average)')
+@click.option('--int_rew_eps', default=1e-5, type=float, help='Epsilon for IR normalization')
+@click.option('--int_rew_clip', default=-1, type=float, help='Clip IRs into [-X, X] when X>0')
+@click.option('--aegis_nov_exp_mem_capacity', default=10000, type=int, help='Novel experience memory capacity (AEGIS)')
+@click.option('--aegis_knn_k', default=5, type=int, help='Search for K nearest neighbors (AEGIS)')
+@click.option('--aegis_dst_momentum', default=0.997, type=float, help='EMA smoothing factor for averaging embedding distances (AEGIS)')
+@click.option('--dsc_obs_queue_len', default=100000, type=int, help='Maximum length of observation queue (DEIR)')
+@click.option('--icm_forward_loss_coef', default=0.2, type=float, help='Coefficient of forward model losses (ICM)')
+@click.option('--ngu_knn_k', default=10, type=int, help='Search for K nearest neighbors (NGU)')
+@click.option('--ngu_use_rnd', default=1, type=int, help='Whether to enable lifelong IRs generated by RND (NGU)')
+@click.option('--ngu_dst_momentum', default=0.997, type=float, help='EMA smoothing factor for averaging embedding distances (NGU)')
+@click.option('--rnd_use_policy_emb', default=1, type=int, help='Whether to use the embeddings learned by policy/value nets as inputs (RND)')
+@click.option('--rnd_err_norm', default=1, type=int, help='Normalized RND errors by: [0] No normalization [1] Standardization [2] Min-max normalization [3] Standardization w.o. subtracting the mean')
+@click.option('--rnd_err_momentum', default=-1, type=float, help='EMA smoothing factor for RND error normalization (-1: total average)')
 # Network params
 @click.option('--use_model_rnn', default=1, type=int, help='Whether to enable RNNs for the dynamics model')
 @click.option('--latents_dim', default=256, type=int, help='Dimensions of latent features in policy/value nets\' MLPs')
@@ -371,6 +424,9 @@ def generate_trajectories(config):
 @click.option('--rmsprop_momentum', default=0.0, type=float, help='RMSProp optimizer option')
 # Logging & Video Generation options
 @click.option('--write_local_logs', default=0, type=int, help='Whether to output training logs locally')
+@click.option('--enable_plotting', default=0, type=int, help='Whether to generate plots for analysis')
+@click.option('--plot_interval', default=10, type=int, help='Interval of generating plots (iterations)')
+@click.option('--plot_colormap', default='Blues', type=str, help='Colormap of plots to generate')
 @click.option('--chunk_size', default=32, type=int, help='Chunk size for trajectory generation (number of videos generated at the same time')
 @click.option('--fps', default=5, type=int, help='FPS of generated trajectory videos (default is for MiniGrid)')
 @click.option('--video_length', default=100, type=int, help='Max length of the video (frames)')
@@ -379,17 +435,21 @@ def generate_trajectories(config):
 @click.option('--xai_network', default='value', type=str, help='Network for generating XAI videos saliency maps of policy predictions: [value|policy]')
 @click.option('--traj_overwrite', default=True, type=bool, help='Whether the generated trajectories should overwrite existing ones in the log directory (if 0, trajectories will be saved with an incremental index)')
 @click.option('--record_video', default=0, type=int, help='Whether the environment should be wrapped in a video recorder (don\'t use for human feedback setting)')
+@click.option('--log_dsc_verbose', default=0, type=int, help='Whether to record the discriminator loss for each action')
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
-def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_dim, num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, 
+@click.option('--use_status_predictor', default=0, type=int, help='Whether to train status predictors for analysis (MiniGrid only)')
+
+def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_dim, learning_rate, model_learning_rate, num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, 
          can_see_walls, fully_obs, image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, 
          n_epochs, model_n_epochs, gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, 
          adv_norm, adv_eps, adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter,
-         reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn, ext_rew_coef, int_rew_source, 
-         use_model_rnn, 
+         reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn, ext_rew_coef, ext_rew_pretrain_coef, int_rew_coef,
+         int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip, aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum, dsc_obs_queue_len, log_dsc_verbose, 
+         icm_forward_loss_coef, ngu_knn_k, ngu_dst_momentum, ngu_use_rnd, rnd_err_norm, rnd_err_momentum, use_model_rnn, rnd_use_policy_emb,
          latents_dim, model_latents_dim, policy_cnn_type, policy_mlp_layers, policy_cnn_norm, policy_mlp_norm, policy_gru_norm, model_cnn_type, 
          model_mlp_layers, model_cnn_norm, model_mlp_norm, model_gru_norm, activation_fn, cnn_activation_fn, gru_layers, optimizer, 
-         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, chunk_size, fps, video_length, gen_xai_videos, xai_method, xai_network,
-         traj_overwrite, record_video, env_render):
+         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, enable_plotting, plot_interval, plot_colormap, chunk_size, fps, video_length, gen_xai_videos, xai_method, xai_network,
+         traj_overwrite, record_video, env_render, use_status_predictor):
     
     set_random_seed(run_id, using_cuda=True)
     args = locals().items()

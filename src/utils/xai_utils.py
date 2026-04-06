@@ -7,7 +7,7 @@ from src.utils.enum_types import XplainMethod
 from captum.attr import (
     Saliency, InputXGradient, GuidedBackprop, Deconvolution,
     IntegratedGradients, DeepLift, GradientShap, DeepLiftShap,
-    LayerGradCam, NoiseTunnel, LayerAttribution
+    LayerGradCam, NoiseTunnel, LayerAttribution, LRP
 )
 
 class ValueNetworkWrapper(nn.Module):
@@ -43,6 +43,8 @@ def fetch_captum_explainer(enum_method, wrapper, model=None, kwargs=None):
         return GuidedBackprop(wrapper)
     elif enum_method == XplainMethod.Deconvolution:
         return Deconvolution(wrapper)
+    elif enum_method == XplainMethod.LRP:
+        return LRP(wrapper)
     elif enum_method == XplainMethod.IntegratedGradients:
         return IntegratedGradients(wrapper)
     elif enum_method == XplainMethod.SmoothIntegratedGradients:
@@ -63,7 +65,7 @@ def fetch_captum_explainer(enum_method, wrapper, model=None, kwargs=None):
 def fetch_attribution(xai_method: XplainMethod, xplainer, obs_tensor, policy_mems, actions_tensor, target=None):
     baseline = th.zeros_like(obs_tensor)
     baseline_dist = th.zeros(5, *obs_tensor.shape[1:], device=obs_tensor.device)
-    if xai_method in [XplainMethod.Saliency, XplainMethod.InputXGradient, XplainMethod.GuidedBackprop, XplainMethod.Deconvolution]:
+    if xai_method in [XplainMethod.Saliency, XplainMethod.InputXGradient, XplainMethod.GuidedBackprop, XplainMethod.Deconvolution, XplainMethod.LRP]:
         return xplainer.attribute(obs_tensor, additional_forward_args=(policy_mems, actions_tensor), target=target)
     elif xai_method in [XplainMethod.SmoothSaliency]:
         return xplainer.attribute(obs_tensor, additional_forward_args=(policy_mems, actions_tensor), target=target, nt_samples=5, nt_type='smoothgrad')
