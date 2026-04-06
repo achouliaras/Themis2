@@ -90,15 +90,20 @@ class MLPEnsemble(BaseRewardModel):
         return curr_cnn_embs, None, None
 
 
-    def r_hat(self, curr_obs: Tensor, curr_act: Tensor, last_mems: Optional[Tensor] = None) -> Tensor:
-        # Return the average rewards from all ensemble members
+    def r_hat(self, curr_obs: Tensor, curr_act: Tensor, last_mems: Optional[Tensor] = None, get_disagreement: bool = False) -> Tensor:
+        # Return the average rewards from all ensemble members for a single (obs, act) pair. 
+        # If get_disagreement is True, also return the variance across members as an uncertainty measure.
         curr_cnn_embs, curr_rnn_embs, _ = self._get_embedding(curr_obs, last_mems)
         if self.use_model_rnn:
             curr_emb = curr_rnn_embs
         else:
             curr_emb = curr_cnn_embs
-        r_hat_all = self.r_hat_members(curr_emb, curr_act)
-        return r_hat_all.mean(dim=0)  # mean over ensemble members
+        r_hat_all = th.stack([m(curr_emb, curr_act) for m in self.ensemble_nn])
+        if get_disagreement:
+            disagreement = r_hat_all.var(dim=0)
+            return r_hat_all.mean(dim=0), disagreement
+        else:
+            return r_hat_all.mean(dim=0)  # mean over ensemble members
 
 
     def r_hat_members(self, curr_obs: Tensor, curr_act: Tensor, last_mems: Optional[Tensor] = None) -> Tensor:
