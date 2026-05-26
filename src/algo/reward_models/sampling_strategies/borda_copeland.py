@@ -85,7 +85,7 @@ class BordaCopelandSampling:
         pairwise_accuracy = 100 * correct / total if total > 0 else 0
         print(f"Pairwise ranking accuracy: {pairwise_accuracy:.2f}%")
         
-    def get_next_pairs(self, traj_ids: np.ndarray, new_episodes: np.ndarray, *args, **kwargs) -> np.ndarray:
+    def get_all_pairs(self, traj_ids: np.ndarray, new_episodes: np.ndarray, *args, **kwargs) -> np.ndarray:
         """
         Exhaustive round-robin sampling:
         1. All unique pairs among new videos.

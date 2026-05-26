@@ -110,56 +110,48 @@ class TrainingConfig():
             return wrapper_class
         return None
 
-    def get_env(self, wrapper_class=None, num_processes=1, seed=None):
-        if self.env_source == EnvSrc.MiniGrid:
-            env = make_vec_env(
-                self.env_name,
-                wrapper_class=wrapper_class,
-                vec_env_cls=DummyVecEnv,
-                n_envs=num_processes,
-                monitor_dir=None,
-                seed=seed if seed is not None else self.run_id,
-            )
-            env = VecTransposeImage(env)
-        elif self.env_source in [EnvSrc.MuJoCo, EnvSrc.Atari, EnvSrc.ClassicControl, EnvSrc.Box2D]:
-            env = make_vec_env(
-                self.env_name,
-                wrapper_class=wrapper_class,
-                vec_env_cls=DummyVecEnv,
-                n_envs=num_processes,
-                monitor_dir=None,
-                seed=seed if seed is not None else self.run_id,
-            )     
-        elif self.env_source == EnvSrc.ProcGen:
-            # Procgen is natively vectorized; we just force it to 1 environment
-            env = ProcgenEnv(
-                num_envs=1,
-                env_name=self.env_name,
-                rand_seed= seed if seed is not None else self.run_id,
-                num_threads=1, # Reduced threads for a single env
-                distribution_mode=self.procgen_mode,
-            )
-            # We keep VecMonitor because Procgen outputs are specific
-            env = VecMonitor(venv=env)
-        else:
-            raise NotImplementedError
+    def get_env(self, wrapper_class=None, num_processes=1, seed=None, chunk=None, lock_runs=False, lock_tries=False):
+        if chunk is not None:
+            num_processes = len(chunk)
 
-        # Video recording for single environments usually uses gym.wrappers.RecordVideo
-        # instead of VecVideoRecorder
-        if (self.record_video == 2) or \
-                (self.record_video == 1 and self.run_id == 0):
-            video_path = os.path.join(self.log_dir, 'videos')
-            _trigger = lambda x: x > 0 and x % (self.n_steps * self.rec_interval) == 0
-            
-            # If it's Procgen, it's technically still a 'VecEnv' of size 1
-            if self.env_source == EnvSrc.ProcGen:
-                env = VecVideoRecorder( env, video_path, record_video_trigger=_trigger, video_length=self.video_length)
-            else:
-                # For standard MiniGrid/Gym
-                env = gym.wrappers.RecordVideo(
-                    env, video_path, episode_trigger=_trigger, video_length=self.video_length
-                )
-                
+        if self.env_source in [EnvSrc.MiniGrid,EnvSrc.MuJoCo, EnvSrc.Atari, EnvSrc.ClassicControl, EnvSrc.Box2D]:
+            def make_single_env(rank):
+                def _init():
+                    kwargs = {"render_mode": "rgb_array"}
+                    env = gym.make(self.env_name, **kwargs)
+                    
+                    # Extract specific metadata for this execution thread
+                    env_id, trial = chunk[rank] if chunk is not None else (None, None)
+                    
+                    # Compute a completely collision-free unique seed
+                    base_seed = seed if seed is not None else 0 # You can set a default seed
+                    tries_seed = trial if lock_tries is not True else 0 # You can set if trial number alters the seed or not
+                    runs_seed = self.run_id if lock_runs is not True else 0 # You can set if run_id alters the seed or not
+
+                    if chunk is None: # If not using chunking, just use run_id and trial for seeding to ensure different seeds across runs and trials
+                        this_seed = runs_seed*1000 + base_seed + rank
+                    else: # If using chunking, incorporate env_id and trial into the seed to ensure uniqueness across all parallel environments, runs, and trials
+                        this_seed = runs_seed*1000 + env_id*100 + tries_seed + base_seed
+                    
+                    env.reset(seed=this_seed)
+                    
+                    # Pass tracking IDs straight into your custom wrapper for file-naming
+                    if wrapper_class is not None:
+                        try:
+                            env = wrapper_class(env, env_id=env_id, trial=trial, run_id=self.run_id)
+                        except TypeError:
+                            # Fallback if wrapper doesn't accept tracking variables
+                            env = wrapper_class(env)
+                    return env
+                return _init
+
+            # Replacing make_vec_env with direct DummyVecEnv instantiation
+            env = DummyVecEnv([make_single_env(i) for i in range(num_processes)])
+        
+            if self.env_source == EnvSrc.MiniGrid:
+                env = VecTransposeImage(env)
+        else:
+            raise NotImplementedError                
         return env
 
     def get_venv(self, wrapper_class=None):

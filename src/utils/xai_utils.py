@@ -10,9 +10,9 @@ from captum.attr import (
     LayerGradCam, NoiseTunnel, LayerAttribution, LRP
 )
 
-class ValueNetworkWrapper(nn.Module):
+class NetworkWrapper(nn.Module):
     def __init__(self, sb3_model, explain_model='value'):
-        super(ValueNetworkWrapper, self).__init__()
+        super(NetworkWrapper, self).__init__()
         # Store the SB3 model as a submodule so Captum can find its layers
         self.sb3_model = sb3_model
         self.explain_model = explain_model
@@ -24,7 +24,7 @@ class ValueNetworkWrapper(nn.Module):
         if self.explain_model == 'value':
             values = self.sb3_model.policy.value_net(latent_vf)
             return values.squeeze(-1)
-        elif self.explain_model == 'action':
+        elif self.explain_model == 'policy':
             distribution = self.sb3_model.policy._get_action_dist_from_latent(latent_pi)
             log_probs = distribution.log_prob(actions_in)
             return log_probs
@@ -78,7 +78,7 @@ def fetch_attribution(xai_method: XplainMethod, xplainer, obs_tensor, policy_mem
     elif xai_method in [XplainMethod.GradientSHAP, XplainMethod.DeepLiftShap]:
         return xplainer.attribute(obs_tensor, additional_forward_args=(policy_mems, actions_tensor), baselines=baseline_dist, target=target)
     elif xai_method == XplainMethod.GradCAM:
-        layer_grads = xplainer.attribute(obs_tensor, additional_forward_args=(policy_mems, actions_tensor), relu_attributions=True, target=target)
+        layer_grads = xplainer.attribute(obs_tensor, additional_forward_args=(policy_mems, actions_tensor), relu_attributions=False, target=target)
         # Upsample back to (Batch, C, H, W)
         return LayerAttribution.interpolate(layer_grads, obs_tensor.shape[2:])
     else:
@@ -186,7 +186,9 @@ def generate_attribution_map(observations, policy_mems, actions, env, device, xp
 
     # 5. Process each environment in the batch
     for i in range(len(observations)):
-        local_saliency = saliency_batch[i]
+        UNSEEN_IDX = 0  # Assuming the first channel indicates unseen tiles with a specific index
+        visible_masks = observations[i, 0, :, :] != UNSEEN_IDX
+        local_saliency = saliency_batch[i] * visible_masks
         frame = frames[i]
         render_h, render_w, _ = frame.shape
         
@@ -199,18 +201,13 @@ def generate_attribution_map(observations, policy_mems, actions, env, device, xp
 
         # Project local 7x7 (or VxV) attribution to the global coordinate space
         global_saliency = project_attribution_to_global_fast(
-            attribution_map=local_saliency, 
+            attribution_map=local_saliency.T, 
             agent_pos=agent_positions[i], 
             agent_dir=agent_dirs[i], 
             env_width=grid_widths[i], 
             env_height=grid_heights[i], 
             tile_size=tile_size # Fallback to 8 if not in config
         )
-        
-        # # POSITIVE NORMALIZATION to [0, 255]
-        # if global_saliency.max() > 0:
-        #     global_saliency = (global_saliency - global_saliency.min()) / (global_saliency.max() - global_saliency.min() + 1e-8)
-        # global_saliency = np.uint8(global_saliency * 255)
         
         # SYMMETRIC NORMALIZATION (Keeps 0 at 0)
         # Find the absolute maximum so we can scale everything between -1.0 and 1.0
@@ -220,41 +217,137 @@ def generate_attribution_map(observations, policy_mems, actions, env, device, xp
         else:
             global_saliency = global_saliency
 
+        # --- SIMPLY CHANGE THESE LINES TO ALTER THE PATTERN WORKFLOW ---
+        POS_PATTERN_STYLE = "circles"   # Options: 'circles', 'rhomboids', 'horizontal', 'vertical', 'diagonal', 'x_lines', 'none'
+        POS_PATTERN_SPACING = 16       # Pixels between repeating pattern lines/dots
+        POS_PATTERN_THICKNESS = 4     # Width of lines or radius of circles
+        
+        NEG_PATTERN_STYLE = "circles"   # Options: 'circles', 'rhomboids', 'horizontal', 'vertical', 'diagonal', 'x_lines', 'none'
+        NEG_PATTERN_SPACING = 16       # Pixels between repeating pattern lines/dots
+        NEG_PATTERN_THICKNESS = 4     # Width of lines or radius of circles
+        
+        # ---------------------------------------------------------------
+        
         # Scale up to the high-res render dimensions
         saliency_resized = cv2.resize(global_saliency, (render_w, render_h), interpolation=cv2.INTER_NEAREST)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         
-        # # Apply colormap
-        # heatmap = cv2.applyColorMap(saliency_resized, cv2.COLORMAP_JET)
+        # 1. Fetch your patterned overlay choice via the factory function
+        pos_pattern_mask = get_pattern_mask(
+            pattern_type=POS_PATTERN_STYLE, 
+            h=render_h, 
+            w=render_w, 
+            spacing=POS_PATTERN_SPACING, 
+            thickness=POS_PATTERN_THICKNESS
+        )
+        neg_pattern_mask = get_pattern_mask(
+            pattern_type=NEG_PATTERN_STYLE, 
+            h=render_h, 
+            w=render_w, 
+            spacing=NEG_PATTERN_SPACING, 
+            thickness=NEG_PATTERN_THICKNESS
+        )
         
-        # # Mask and Blend
-        # mask = saliency_resized > 0
-
-        # # Original video frames underneath.
-        # blended = frame_bgr.copy()
-        # # Blend only where the agent is looking (80% original, 20% heatmap)
-        # blended[mask] = cv2.addWeighted(frame_bgr, 0.8, heatmap, 0.2, 0)[mask]
-        
-        # Alpha is the absolute magnitude (0.0 to 1.0). Scale by 0.6 for max opacity.
-        alpha = np.abs(saliency_resized)[..., np.newaxis] * 0.5
-        
-        # Create solid BGR canvases
-        red_canvas = np.zeros_like(frame_bgr)
-        red_canvas[:] = [0, 0, 255]   # Pure Red for positive
-        
-        blue_canvas = np.zeros_like(frame_bgr)
-        blue_canvas[:] = [255, 0, 0]  # Pure Blue for negative
+        # 2. Compute normal continuous alpha magnitude
+        alpha_pos = np.abs(saliency_resized)[..., np.newaxis] * 0.6
+        alpha_neg = np.abs(saliency_resized)[..., np.newaxis] * 0.8
         
         # Create boolean masks for positive and negative regions
-        pos_mask = (saliency_resized > 0)[..., np.newaxis]
-        neg_mask = (saliency_resized < 0)[..., np.newaxis]
+        pos_mask = (saliency_resized > 0)[..., np.newaxis] # Keep positive values mask negatives
+        neg_mask = (saliency_resized < 0)[..., np.newaxis] # Keep negative values mask positives
         
-        # Blend mathematically
-        blended = frame_bgr * (1.0 - alpha)                           # Darken original frame where alpha is high
-        blended += np.where(pos_mask, red_canvas * alpha, 0)          # Add red to positive areas
-        blended += np.where(neg_mask, blue_canvas * alpha, 0)         # Add blue to negative areas
+        # 3. Apply the pattern modifier mask to the alpha matrix
+        alpha_green = alpha_pos * pos_pattern_mask * pos_mask
+        alpha_red = alpha_neg * neg_pattern_mask * neg_mask
+        total_alpha = alpha_green + alpha_red
+        
+        # Create solid BGR canvases
+        red_canvas = np.zeros_like(frame)
+        red_canvas[:] = [255, 0, 0]   
+        
+        green_canvas = np.zeros_like(frame)
+        green_canvas[:] = [0, 255, 0]  
+        
+        # 4. Blend mathematically using the patterned alpha matrix
+        blended = frame * (1.0 - total_alpha)                           
+        blended += green_canvas * alpha_green          
+        blended += red_canvas * alpha_red
 
         # Convert back to RGB for video writers like imageio or wandb
-        blended_rgb = cv2.cvtColor(blended.astype(np.uint8), cv2.COLOR_BGR2RGB)
-        blended_frames.append(blended_rgb)
+        blended_frames.append(blended.astype(np.uint8))
     return blended_frames
+
+def _pattern_squares(h, w, spacing, thickness):
+    y = np.arange(h)[:, None] % spacing - (spacing / 2)
+    x = np.arange(w)[None, :] % spacing - (spacing / 2)
+    mask = (np.abs(y) <= thickness) & (np.abs(x) <= thickness)
+    return mask.astype(np.float32)[..., np.newaxis]
+
+def _pattern_circles(h, w, spacing, thickness):
+    y = np.arange(h)[:, None] % spacing - (spacing / 2)
+    x = np.arange(w)[None, :] % spacing - (spacing / 2)
+    mask = (y**2 + x**2) <= thickness**2
+    return mask.astype(np.float32)[..., np.newaxis]
+
+def _pattern_rhomboids(h, w, spacing, thickness):
+    # Center the coordinates inside each logical 'spacing' box
+    y = np.arange(h)[:, None] % spacing - (spacing / 2)
+    x = np.arange(w)[None, :] % spacing - (spacing / 2)
+    
+    # Manhattan distance (|x| + |y| <= thickness) creates a sharp diamond/rhombus
+    mask = (np.abs(y) + np.abs(x)) <= thickness
+    return mask.astype(np.float32)[..., np.newaxis]
+
+def _pattern_horizontal_lines(h, w, spacing, thickness):
+    y_match = np.arange(h) % spacing < thickness
+    mask = np.zeros((h, w), dtype=np.float32)
+    mask[y_match, :] = 1.0
+    return mask[..., np.newaxis]
+
+def _pattern_vertical_lines(h, w, spacing, thickness):
+    x_match = np.arange(w) % spacing < thickness
+    mask = np.zeros((h, w), dtype=np.float32)
+    mask[:, x_match] = 1.0
+    return mask[..., np.newaxis]
+
+def _pattern_diagonal_lines(h, w, spacing, thickness):
+    y = np.arange(h)[:, None]
+    x = np.arange(w)[None, :]
+    mask = (y + x) % spacing < thickness
+    return mask.astype(np.float32)[..., np.newaxis]
+
+def _pattern_x_lines(h, w, spacing, thickness):
+    y = np.arange(h)[:, None]
+    x = np.arange(w)[None, :]
+    
+    # Forward diagonal lines (/)
+    diag1 = (y + x) % spacing < thickness
+    
+    # Backward diagonal lines (\)
+    # NumPy handles negative modulo beautifully, so this tiles perfectly
+    diag2 = (y - x) % spacing < thickness
+    
+    # Combine them with a bitwise OR so pixels matching EITHER pattern are kept
+    mask = diag1 | diag2
+    
+    return mask.astype(np.float32)[..., np.newaxis]
+
+def get_pattern_mask(pattern_type, h, w, spacing=16, thickness=3):
+    """
+    Returns a float32 binary pattern mask of shape (H, W, 1).
+    Available styles: 'squares', 'circles', 'rhomboids', 'horizontal', 'vertical', 'diagonal', 'none'
+    """
+    patterns = {
+        "squares": _pattern_squares,
+        "circles": _pattern_circles,
+        "rhomboids": _pattern_rhomboids,
+        "horizontal": _pattern_horizontal_lines,
+        "vertical": _pattern_vertical_lines,
+        "diagonal": _pattern_diagonal_lines,
+        "x_lines": _pattern_x_lines,
+        "none": lambda h, w, spacing, thickness: np.ones((h, w, 1), dtype=np.float32)  # No pattern, full alpha
+    }
+    
+    if pattern_type not in patterns:
+        raise ValueError(f"Unknown pattern style '{pattern_type}'. Choose from {list(patterns.keys())}")
+        
+    return patterns[pattern_type](h, w, spacing, thickness)

@@ -4,38 +4,32 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
-LABELS = {"NoModel": "PPO", 
-          "ICM": "ICM", 
-          "RND": "RND", 
-          "NGU": "NGU", 
-          "NovelD":"NovelD", 
-          "DEIR":"DEIR",
-          "AEGIS": "AEGIS",
+LABELS = {"NoModel": "PPO",
+          "AEGIS_A_group": "RM A",
+          "AEGIS_B_group": "RM B",
+          "AEGIS_C_group": "RM Control",
+          "AEGIS_Pure_RL": "RL Oracle",
           }
 
-MODES = {"NoPreTrain": "NPT",
-         "QuarterPreTrain": "1QPT",
-         "HalfPreTrain": "HPT",
-         "ThreeQuarterPreTrain": "3QPT",
+MODES = {
          "test": "Test",
+         "XAI_EVAL": "XAI Eval",
          }
 
 # Custom colors and markers for each algo
 COLORS = {"NoModel": "black",
-          "ICM": "brown",
-          "RND": "orange",
-          "NGU": "green",
-          "NovelD": "purple",
-          "DEIR": "red",
+          "AEGIS_Pure_RL": "black",
+          "AEGIS_A_group": "red",
+          "AEGIS_B_group": "green",
+          "AEGIS_C_group": "blue",
           "AEGIS": "blue",
           }
 
 MARKERS = {"NoModel": "o",
-           "ICM": "s",
-           "RND": "D",
-           "NGU": "^",
-           "NovelD": "v",
-           "DEIR": "P",
+           "AEGIS_Pure_RL": "o",
+           "AEGIS_A_group": "s",
+           "AEGIS_B_group": "^",
+           "AEGIS_C_group": "X",
            "AEGIS": "X",
            }
 
@@ -55,7 +49,7 @@ ENV_TITLES = {
 }
 
 SMOOTHING_WINDOW = {
-    "MiniGrid-BlockedUnlockPickup-v0": 2,
+    "MiniGrid-BlockedUnlockPickup-v0": 10,
     "MiniGrid-RedBlueDoors-8x8-v0": 25,
     "MiniGrid-LavaGapS7-v0": 25,
     "MiniGrid-DoorKey-8x8-v0": 25,
@@ -75,7 +69,7 @@ def plot_all_envs_modes(
     envs: List[str],
     modes: List[str],
     algos: List[str],
-    data_to_plot: str = "rollout/ep_info_rew_mean",
+    data_to_plot: str = "rollout/ep_rew_mean",
     base_path: str = "logs",
     out_file_name: str = "all_envs_modes.png",
     n_seeds: int = 10,
@@ -103,8 +97,8 @@ def plot_all_envs_modes(
             y_pos = 1 - 0.125 - 0.925*i / n_rows  # row center in figure coords
         else:
             y_pos = 1 - 0.235 - 0.925*i / n_rows  # row center in figure coords
-        fig.text(0.01, y_pos, MODES[mode], va="center", ha="center",
-             rotation=90, fontsize=16, fontweight="bold")
+        # fig.text(0.01, y_pos, MODES[mode], va="center", ha="center",
+        #      rotation=90, fontsize=16, fontweight="bold")
         for j, env in enumerate(envs):
             ax = axes[i][j]
 
@@ -125,9 +119,9 @@ def plot_all_envs_modes(
                         df = pd.read_csv(csv_path)
                     except Exception:
                         continue
+                        
                     if not required_cols.issubset(df.columns):
                         continue
-
                     if "rollout/ext_rew_coef" in df.columns:
                         mask = df["rollout/ext_rew_coef"] == 0
                         if mask.any():
@@ -141,6 +135,7 @@ def plot_all_envs_modes(
                             if "time/total_timesteps" in rm_df.columns:
                                 rm_update_steps.update(rm_df["time/total_timesteps"].unique())
                         except Exception:
+                            print(f"Warning: Failed to read RM updates from {rm_csv_path} for {env}-{mode}-{algo}-seed{seed}")
                             pass
 
                     df = df[["time/total_timesteps", data_to_plot]]
@@ -161,18 +156,24 @@ def plot_all_envs_modes(
                 rewards = merged.drop(columns=["time/total_timesteps"])
                 merged["mean"] = rewards.mean(axis=1)
                 merged["std"] = rewards.std(axis=1)
+                merged["median"] = rewards.median(axis=1)
+                merged["p25"] = rewards.quantile(0.25, axis=1)
+                merged["p75"] = rewards.quantile(0.75, axis=1)
 
                 # --- smoothing (moving average) ---
                 window = SMOOTHING_WINDOW[env]  # adjust size as needed
                 merged["mean"] = merged["mean"].rolling(window, min_periods=1, center=True).mean()
                 merged["std"] = merged["std"].rolling(window, min_periods=1, center=True).mean()
+                merged["median"] = merged["median"].rolling(window, min_periods=1, center=True).mean()
+                merged["p25"] = merged["p25"].rolling(window, min_periods=1, center=True).mean()
+                merged["p75"] = merged["p75"].rolling(window, min_periods=1, center=True).mean()
 
-                averaged[algo] = merged[["time/total_timesteps", "mean", "std"]]
+                averaged[algo] = merged[["time/total_timesteps", "mean", "std", "median", "p25", "p75"]]
 
                 # --- plotting ---
                 ax.plot(
                     merged["time/total_timesteps"], 
-                    merged["mean"],
+                    merged["median"],
                     label=LABELS[algo],
                     color=COLORS[algo],
                     marker=MARKERS[algo],
@@ -180,8 +181,8 @@ def plot_all_envs_modes(
                 )
                 ax.fill_between(
                     merged["time/total_timesteps"],
-                    merged["mean"] - merged["std"],
-                    merged["mean"] + merged["std"],
+                    merged["p25"],
+                    merged["p75"],
                     color=COLORS[algo],
                     alpha=0.2
                 )
@@ -246,10 +247,10 @@ def plot_all_envs_modes(
 if __name__ == "__main__":
     envs = ["MiniGrid-BlockedUnlockPickup-v0",
             ]
-    modes = ['test'] # "NoPreTrain", "QuarterPreTrain", "HalfPreTrain", "ThreeQuarterPreTrain"
-    algos_to_compare = ["AEGIS"] # "NoModel", "ICM", "RND", "NGU", "NovelD", "DEIR", 
-    plot_all_envs_modes(envs, modes, algos_to_compare, data_to_plot="rollout/ep_true_rew_mean", base_path="logs", out_file_name="reward_test.png", n_seeds=1,
-                        figsize=(12, 7), save_kwargs={"dpi": 400})
+    modes = ['XAI_EVAL'] # "NoPreTrain", "QuarterPreTrain", "HalfPreTrain", "ThreeQuarterPreTrain"
+    algos_to_compare = ["AEGIS_Pure_RL", "AEGIS_C_group", "AEGIS_B_group", "AEGIS_A_group"] # "NoModel", "ICM", "RND", "NGU", "NovelD", "DEIR", 
+    plot_all_envs_modes(envs, modes, algos_to_compare, data_to_plot="rollout/ep_info_true_rew_mean", base_path="logs", out_file_name="reward_test.png", n_seeds=10,
+                        figsize=(9, 5), save_kwargs={"dpi": 400})
 
     # plot_all_envs_modes(envs, modes, algos_to_compare, data_to_plot="rollout/ep_info_rew_mean", base_path="logs", out_file_name="reward_all_envs_modes.png", n_seeds=10,
     #                     figsize=(16, 7), save_kwargs={"dpi": 400})

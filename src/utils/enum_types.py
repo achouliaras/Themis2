@@ -128,6 +128,7 @@ class SamplingStrategy(Enum):
     SwissInfoGain = 2
     BordaCopeland = 3 # Round-Robin
     TrueSkill = 4
+    Custom = 5 # For custom sampling strategies implemented outside of this codebase
 
     @staticmethod
     def get_enum_sampling_strategy(sampling_strategy):
@@ -145,6 +146,8 @@ class SamplingStrategy(Enum):
                 return SamplingStrategy.BordaCopeland
             if sampling_strategy in ['trueskill', 'true_skill']:
                 return SamplingStrategy.TrueSkill
+            if sampling_strategy == 'custom':
+                return SamplingStrategy.Custom
         raise ValueError
 
 class VideoProcessingMode(Enum):

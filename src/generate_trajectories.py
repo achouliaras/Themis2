@@ -17,21 +17,27 @@ from src.algo.ppo_model import PPOModel
 from src.algo.ppo_trainer import PPOTrainer
 from src.utils.configs import TrainingConfig
 from src.utils.enum_types import EnvSrc, XplainMethod
-from src.utils.xai_utils import ValueNetworkWrapper, fetch_captum_explainer, generate_attribution_map
+from src.utils.xai_utils import NetworkWrapper, fetch_captum_explainer, generate_attribution_map
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.utils import obs_as_tensor
 
-def get_trajectory_ids(path, run_id):
-    # Matches 'traj', then your run_id, then captures 3 digits, then '.mp4'
-    pattern = re.compile(rf"^traj{run_id:02}(\d{{3}})\.mp4$")
+def get_trajectory_ids(path, run_id, max_trials=10):
+    pattern = re.compile(rf"^traj{run_id:02}_(\d{{2}})_(\d{{2}})\.mp4$")
     
-    # 1. Extract all matching IDs into a set
-    existing = {int(pattern.match(f).group(1)) for f in os.listdir(path) if pattern.match(f)}
+    # 1. Extract existing tuples (requires Python 3.8+ for :=)
+    existing = {(int(m.group(1)), int(m.group(2))) for f in os.listdir(path) if (m := pattern.match(f))}
+
+    if not existing:
+        return existing, set(), 0
+        
+    max_env, max_t = max(existing)
     
-    # 2. Identify missing IDs and the next available ID
-    max_id = max(existing) if existing else -1
-    missing = {i for i in range(max_id) if i not in existing}
-    next_id = max_id + 1
+    # 2. Generate all expected pairs up to the max seen, then subtract existing
+    expected = {(e, t) for e in range(max_env + 1) for t in range(max_trials if e <= max_env else max_t + 1)}
+    missing = expected - existing
+    
+    # 3. Determine the next ID with a simple inline check
+    next_id = max_env + 1 if len(missing) == 0 else min(missing)[0]
     
     return existing, missing, next_id
 
@@ -67,12 +73,15 @@ def generate_trajectories(config):
             file_path = os.path.join(traj_data_path, filename)
             if os.path.isfile(file_path):
                 os.remove(file_path)
-    existing_video_ids, missing_video_ids, displacement = get_trajectory_ids(traj_videos_path, config.run_id)
+    existing_video_ids, missing_video_ids, displacement = get_trajectory_ids(traj_videos_path, config.run_id, config.tries_per_episode)
 
     # Determine which trajectory video IDs need to be generated based on existing files and the overwrite setting
-    gen_video_ids = missing_video_ids.union(set(range(displacement, displacement + config.episode_num)))
-    gen_video_ids = sorted(gen_video_ids)[:config.episode_num] # Ensure we only generate the required number of episodes
-    print(f"==Existing_video_ids: {existing_video_ids}\n==Displacement: {displacement}\n==Missing_video_ids: {missing_video_ids}\n==Gen_video_ids: {gen_video_ids}")
+    all_expected_ids = {(env, trial) for env in range(displacement + config.episode_num) for trial in range(config.tries_per_episode)}
+    gen_video_ids = sorted(list(all_expected_ids - existing_video_ids))
+    print(f"==Existing_video_ids: {sorted(list(existing_video_ids))}\n==Missing_video_ids: {missing_video_ids}\n==Displacement: {displacement}\n==Gen_video_ids: {gen_video_ids}")
+    
+    if len(gen_video_ids) == 0:
+        return
     
     callbacks = config.get_callbacks()
     optimizer_class, optimizer_kwargs = config.get_optimizer()
@@ -138,7 +147,11 @@ def generate_trajectories(config):
     for chunk in chunks:
         current_batch_size = len(chunk)
         wrapper_class = config.get_wrapper_class()
-        env = config.get_env(wrapper_class, num_processes=len(chunk), seed=config.run_id*12345 + chunk[0] if config.fixed_seed >= 0 else None)
+        env = config.get_env(wrapper_class, 
+                             seed=config.run_id*12345 if config.fixed_seed >= 0 else None, 
+                             chunk=chunk, 
+                             lock_tries=config.lock_env_tries, 
+                             lock_runs=config.lock_env_run_id)
 
         trainer_kwargs = dict(
             policy=PPOModel,
@@ -201,14 +214,14 @@ def generate_trajectories(config):
 
         model = PPOTrainer.load(load_path=latest_model_path, **trainer_kwargs)
         model.policy.eval() # Set the policy to evaluation mode for trajectory generation
-
+        
         ptr_str = f"Generating trajectories {chunk[0]}-{chunk[-1]}/{config.episode_num}: "
 
         writers = []
         xai_writers = []
-        for vid in chunk:
+        for env_id, trial in chunk:
             writers.append(imageio.get_writer(
-                    f"{config.log_dir}/traj_videos/traj{config.run_id:02}{vid:03}.mp4",
+                    f"{config.log_dir}/traj_videos/traj{config.run_id:02}_{env_id:02}_{trial:02}.mp4",
                     fps=config.fps,
                     codec="libx264",
                     quality=8
@@ -216,7 +229,7 @@ def generate_trajectories(config):
             )
             if config.gen_xai_videos:
                 xai_writers.append(imageio.get_writer(
-                    f"{config.log_dir}/traj_xai_videos/traj{config.run_id:02}{vid:03}.mp4",
+                    f"{config.log_dir}/traj_xai_videos/traj{config.run_id:02}_{env_id:02}_{trial:02}.mp4",
                     fps=config.fps,
                     codec="libx264",
                     quality=8
@@ -232,7 +245,6 @@ def generate_trajectories(config):
         done_list = [[] for _ in range(current_batch_size)]
 
         last_obs = env.reset()
-    
         def float_zeros(tensor_shape):
             return th.zeros(tensor_shape, device=model.device, dtype=th.float32)
         
@@ -240,7 +252,7 @@ def generate_trajectories(config):
         dones = np.zeros(current_batch_size, dtype=bool)
         dones_target = np.zeros(current_batch_size, dtype=bool) # To track which environments have reached done=True at least once
         if config.gen_xai_videos:
-            wrapped_model = ValueNetworkWrapper(model, config.xai_network)
+            wrapped_model = NetworkWrapper(model, config.xai_network)
             xai_method = XplainMethod.get_enum_xplain_method(config.xai_method)
             xplainer = fetch_captum_explainer(xai_method, wrapped_model, model, kwargs=xai_kwargs) # Initialize the Captum explainer with the custom wrapper
 
@@ -255,12 +267,17 @@ def generate_trajectories(config):
             if isinstance(model.action_space, gym.spaces.Box):
                 clipped_action = np.clip(action, model.action_space.low, model.action_space.high)
 
-            next_obs, rewards, dones, infos = env.step(clipped_action)
             frames = env.get_images()
+
             for i, writer in enumerate(writers):
                 if dones_target[i]: # Stop recording if that specific env finished
                     continue
-                writer.append_data(frames[i])
+                if dones[i]:
+                    # add a black frame at the end of the video to indicate episode termination
+                    black_frame = np.zeros_like(frames[i])
+                    writer.append_data(black_frame)
+                else:
+                    writer.append_data(frames[i])
             if config.gen_xai_videos:
                 attribution_maps = generate_attribution_map(last_obs,
                                                             last_policy_mems, 
@@ -273,7 +290,19 @@ def generate_trajectories(config):
                 for i, xai_writer in enumerate(xai_writers):
                     if dones_target[i]: # Stop recording if that specific env finished
                         continue
-                    xai_writer.append_data(attribution_maps[i])
+                    if dones[i]:
+                        # add a black frame at the end of the video to indicate episode termination
+                        black_frame = np.zeros_like(attribution_maps[i])
+                        xai_writer.append_data(black_frame)
+                    else:
+                        xai_writer.append_data(attribution_maps[i])
+            
+            if dones.any():
+                dones_target = np.logical_or(dones_target, dones) # Update the target tracking which envs have reached done=True
+                if dones_target.all(): # If all environments have reached done=True at least once, we can stop the trajectory generation early
+                    break
+                
+            next_obs, rewards, dones, infos = env.step(clipped_action)
             
             for i in range(current_batch_size):
                 if dones_target[i]: # Skip logging for this environment if it has already reached done=True at least once
@@ -287,10 +316,6 @@ def generate_trajectories(config):
                 done_list[i].append(dones[i])
             last_obs = next_obs
             last_policy_mems = policy_mem
-            if dones.any():
-                dones_target = np.logical_or(dones_target, dones) # Update the target tracking which envs have reached done=True
-                if dones_target.all(): # If all environments have reached done=True at least once, we can stop the trajectory generation early
-                    break
 
         for i in range(current_batch_size):
             if not dones_target[i]: # Episode did not finish
@@ -311,8 +336,8 @@ def generate_trajectories(config):
                 "episode_starts": np.array(episode_starts_list[i], dtype=bool),
                 "dones": np.array(done_list[i], dtype=bool)
             }
-            video_id = chunk[i]
-            np.savez_compressed(f"{config.log_dir}/traj_data/traj{config.run_id:02}{video_id:03}.npz", **data)
+            env_id, trial = chunk[i]
+            np.savez_compressed(f"{config.log_dir}/traj_data/traj{config.run_id:02}_{env_id:02}_{trial:02}.npz", **data)
         print(f"{ptr_str} Trajectories {chunk[0]}-{chunk[-1]} completed. Lengths: {[len(reward_list[i]) for i in range(current_batch_size)]}.")
 
     end_time = time.perf_counter()
@@ -366,6 +391,9 @@ def generate_trajectories(config):
 # Reward Model params
 @click.option('--reward_learning_frequency', default=int(0), type=int, help='Frequency of Reward Model updates per agent updates (0: no updates, -1: only once at the beginning, >=1: every X steps)')
 @click.option('--episode_num', default=64, type=int, help='Number of episodes to be generated for Reward Model training')
+@click.option('--tries_per_episode', default=5, type=int, help='Number of times the agent tries to solve each episode')
+@click.option('--lock_env_tries', default=True, type=bool, help='Whether to lock the env seed across tries for the same episode id')
+@click.option('--lock_env_run_id', default=False, type=bool, help='Whether to lock the env seed across runs (to generate identical env setups across different agent seeds)')
 @click.option('--preference_buffer_capacity', default=int(1e4), type=int, help='Number of episodes that can be stored in the preference buffer')
 @click.option('--sampling_strategy', default='Uniform', type=str, help='Sampling strategy for generating preference pairs: [Uniform|SwissInfoGain]')
 @click.option('--pair_num', default=128, type=int, help='Number of preference pairs to be generated for Reward Model training (used for relevant strategies)')
@@ -439,17 +467,18 @@ def generate_trajectories(config):
 @click.option('--env_render', default=0, type=int, help='Whether to render games in human mode')
 @click.option('--use_status_predictor', default=0, type=int, help='Whether to train status predictors for analysis (MiniGrid only)')
 
-def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_dim, learning_rate, model_learning_rate, num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, 
-         can_see_walls, fully_obs, image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, 
-         n_epochs, model_n_epochs, gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, 
-         adv_norm, adv_eps, adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter,
-         reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn, ext_rew_coef, ext_rew_pretrain_coef, int_rew_coef,
-         int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip, aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum, dsc_obs_queue_len, log_dsc_verbose, 
+def main(run_id, group_name, log_dir, total_steps, features_dim, model_features_dim, learning_rate, model_learning_rate, num_processes, batch_size, 
+         n_steps, env_source, game_name, project_name, map_size, can_see_walls, fully_obs, image_noise_scale, procgen_mode, procgen_num_threads, 
+         log_explored_states, fixed_seed, n_epochs, model_n_epochs, gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, 
+         adv_norm, adv_eps, adv_momentum, reward_learning_frequency, episode_num, tries_per_episode, lock_env_tries, lock_env_run_id, preference_buffer_capacity, 
+         sampling_strategy, pair_num, curr_iter, reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn, 
+         ext_rew_coef, ext_rew_pretrain_coef, int_rew_coef, int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip, 
+         aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum, dsc_obs_queue_len, log_dsc_verbose, 
          icm_forward_loss_coef, ngu_knn_k, ngu_dst_momentum, ngu_use_rnd, rnd_err_norm, rnd_err_momentum, use_model_rnn, rnd_use_policy_emb,
          latents_dim, model_latents_dim, policy_cnn_type, policy_mlp_layers, policy_cnn_norm, policy_mlp_norm, policy_gru_norm, model_cnn_type, 
          model_mlp_layers, model_cnn_norm, model_mlp_norm, model_gru_norm, activation_fn, cnn_activation_fn, gru_layers, optimizer, 
-         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, enable_plotting, plot_interval, plot_colormap, chunk_size, fps, video_length, gen_xai_videos, xai_method, xai_network,
-         traj_overwrite, record_video, env_render, use_status_predictor):
+         optim_eps, adam_beta1, adam_beta2, rmsprop_alpha, rmsprop_momentum, write_local_logs, enable_plotting, plot_interval, plot_colormap, 
+         chunk_size, fps, video_length, gen_xai_videos, xai_method, xai_network, traj_overwrite, record_video, env_render, use_status_predictor):
     
     set_random_seed(run_id, using_cuda=True)
     args = locals().items()

@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 import trueskill
+import os
+import cv2
 from src.algo.reward_models.sampling_strategies.utils import load_json, safe_write_json, evaluate_ranking_accuracy
 
 class TrueSkillSampling:
@@ -22,6 +24,31 @@ class TrueSkillSampling:
         # Default is mu=25.0, sigma=8.333
         self.ratings = {}
 
+    def _get_video_length(self, input_dir: str, traj_id: int, length_cache: dict) -> int:
+        """
+        Gets the length of a video. Uses a cache dictionary to ensure we only
+        read each file from the disk once during the entire tournament simulation.
+        """
+        # Return instantly if we already checked this video
+        if traj_id in length_cache:
+            return length_cache[traj_id]
+            
+        filepath = os.path.join(input_dir, f"traj{traj_id}.mp4")
+        
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Heuristic failed: Video file not found at {filepath}")
+        
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video file: {filepath}")
+        
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        
+        # Save to cache before returning
+        length_cache[traj_id] = frame_count
+        return frame_count
+    
     def _get_rating(self, item_id):
         if item_id not in self.ratings:
             self.ratings[item_id] = self.ts_env.create_rating()
@@ -58,7 +85,7 @@ class TrueSkillSampling:
                 self.ts_env = trueskill.TrueSkill(draw_probability=0.10)  # Default if no matches
                 self.games_played = {tid: 0 for tid in self.traj_ids} # Track how many times each trajectory has been used in a match
                 self.ratings = {}
-                self.ratings = {int(tid): self._get_rating(int(tid)) for tid in self.traj_ids}
+                self.ratings = {tid: self._get_rating(tid) for tid in self.traj_ids}
                 return
             if not {'filename', 'label', 'iteration'}.issubset(df.columns):
                 raise ValueError(f"CSV file must contain 'filename', 'label', and 'iteration' columns. Found columns: {df.columns.tolist()}")
@@ -207,3 +234,142 @@ class TrueSkillSampling:
         pairs = np.asarray(pairs, dtype=int)
         print(f"TrueSkill Round {self.round_number}: Generated {len(pairs)} pairs.")
         return pairs
+    
+    def get_all_pairs(self, input_dir: str, traj_ids: list, new_episodes: list, *args, **kwargs) -> np.ndarray:
+        """
+        Generates all pairs using TrueSkill tournament logic based on a video length heuristic.
+        Shorter videos win the matchup automatically.
+        
+        Returns
+        -------
+        np.ndarray of shape (N, 2)
+            Each row contains a pair of trajectory IDs compared across ALL simulated rounds.
+        """
+        if self.curr_iter == 0:
+            self._calculate_ratings_from_csv()
+        else:
+            raise ValueError("get_all_pairs should only be called at the start of an iteration (curr_iter=0).")
+        
+        all_played_pairs = []
+        video_length_cache = {}  # Cache to prevent duplicate disk reads
+        final_round = self.round_number
+
+        # Simulate the tournament rounds
+        for current_round in range(self.round_number, 48):
+            pairs, self.discarded_pairs = self.pair_by_match_quality(traj_ids, self.discarded_pairs, current_round, self.max_rounds)
+            if not pairs:
+                print(f"TrueSkill Heuristic: Equilibrium reached at round {current_round}. Stopping early.")
+                break
+
+            # Simulate the human annotator with the heuristic
+            for a, b in pairs:
+                a_length = self._get_video_length(input_dir, a, video_length_cache)
+                b_length = self._get_video_length(input_dir, b, video_length_cache)
+                if a_length < b_length:
+                    winner = 'Left'
+                elif b_length < a_length:
+                    winner = 'Right'
+                else:
+                    winner = 'Equal'
+                self._update_match(a, b, winner)
+                self.games_played[a] += 1
+                self.games_played[b] += 1
+            all_played_pairs.extend(pairs)
+            final_round = current_round + 1 
+        
+        self.round_number = final_round
+        self.state_data["TrueSkill"] = {
+            "round_number": self.round_number,
+            "iteration": self.curr_iter,
+        }
+        safe_write_json(self.sampler_state_json, self.state_data)
+        if not all_played_pairs:
+            all_played_pairs = np.empty((0, 2), dtype=int)
+        
+        print(f"\n--- Final TrueSkill Rankings (Descending) ---")        
+        # 1. Gather all the data into a list
+        results = []
+        for tid in traj_ids:
+            rating = self._get_rating(tid)
+            length = self._get_video_length(input_dir, tid, video_length_cache)
+            results.append((rating, tid, length))
+            
+        # 2. Sort the list descending by the rating's mean score (mu)
+        results.sort(key=lambda x: x[0].mu, reverse=True)
+        
+        # 3. Print the formatted results
+        i=0
+        for rating, tid, length in results:
+            # Using some basic formatting so the columns line up nicely in your terminal
+            print(f"{i+1:<3}| Traj ID {tid:<5} | Length: {length:<3} frames | Rating: {rating} | Games Played: {self.games_played[tid]}")
+            i += 1
+        print("---------------------------------------------\n")
+
+        # --- Global Check for Relative Order (Inversions) ---
+        if len(results) > 1:
+            # Check every video against EVERY video ranked below it
+            errors = [
+                (results[i], results[j]) 
+                for i in range(len(results)) 
+                for j in range(i + 1, len(results)) 
+                if results[i][2] > results[j][2]
+            ]
+
+            # Print up to 10 errors to avoid flooding your terminal if the list is highly misordered
+            for i, (a, b) in enumerate(errors):
+                if i < 10:
+                    print(f"  ❌ Traj {a[1]} ({a[2]} frames) wrongly ranked above Traj {b[1]} ({b[2]} frames)")
+            if len(errors) > 10:
+                print(f"  ... and {len(errors) - 10} more inversions.")
+
+        print(f"New Episodes: {len(new_episodes)} | Total Videos: {len(traj_ids)} | Errors: {len(errors)}")
+        print(f"Total pairs played: {len(all_played_pairs)}")
+        
+        # check for all duplicates in all_played_pairs
+        unique_pairs = set()
+        for pair in all_played_pairs:
+            if pair in unique_pairs or (pair[1], pair[0]) in unique_pairs:
+                print(f"Duplicate pair found: {pair}")
+            unique_pairs.add(pair)
+        
+        # Auto label trivial pairs based on video length and write to CSV, then filter them out of the returned pairs
+        skip_pairs_set = set()
+        skip_lines = []
+        difference_threshold = 5  # if clips have at least 10 seconds difference
+        
+        for a, b in all_played_pairs:
+            a_length = self._get_video_length(input_dir, a, video_length_cache)
+            b_length = self._get_video_length(input_dir, b, video_length_cache)
+            
+            # Skip pairs that are already equal
+            if a_length == b_length:
+                continue
+            
+            diff = abs(a_length - b_length)
+            
+            # If the difference is significant enough, auto-label it
+            if diff >= difference_threshold:
+                if a_length < b_length:
+                    line = f"traj{a}_traj{b}.mp4,Left,{self.curr_iter},0\n"
+                else:
+                    line = f"traj{a}_traj{b}.mp4,Right,{self.curr_iter},0\n"
+                
+                # Add both permutations to the set for foolproof, lightning-fast filtering
+                skip_pairs_set.add((a, b))
+                skip_pairs_set.add((b, a))
+                skip_lines.append(line)
+
+        # Write to CSV in one bulk operation
+        if skip_lines:
+            with open(self.preferences_csv, 'w') as f:
+                f.write("filename,label,iteration,round\n" + "".join(skip_lines))  # Prepend a newline to ensure we start on a new line
+        
+        total_count = len(all_played_pairs)
+        skipped_count = len(skip_lines)
+        if total_count > 0:
+            print(f"Percentage of pairs skipped to CSV: {skipped_count}/{total_count} = {(skipped_count/total_count)*100:.2f}%")
+        
+        all_played_pairs = [pair for pair in all_played_pairs if tuple(pair) not in skip_pairs_set]
+        # sort pairs for consistency (not strictly necessary)
+        all_played_pairs.sort(key=lambda x: (x[0], x[1]))
+        return np.asarray(all_played_pairs, dtype=str)
