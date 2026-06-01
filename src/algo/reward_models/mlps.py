@@ -23,6 +23,7 @@ class RewardMemberModel(nn.Module):
         self.model_mlp_norm = model_mlp_norm
         self.model_mlp_layers = model_mlp_layers
 
+        # action_num = 0 # for copying rm to PPOs value function
         modules = [
             nn.Linear(model_features_dim + action_num, model_latents_dim),
             NormType.get_norm_layer_1d(model_mlp_norm, model_latents_dim),
@@ -39,5 +40,6 @@ class RewardMemberModel(nn.Module):
 
     def forward(self, curr_emb: Tensor, curr_act: Tensor) -> Tensor:
         one_hot_actions = F.one_hot(curr_act, num_classes=self.action_num)
+        # inputs = curr_emb # for copying rm to PPOs value function
         inputs = th.cat([curr_emb, one_hot_actions], dim=1)
         return self.nn(inputs)

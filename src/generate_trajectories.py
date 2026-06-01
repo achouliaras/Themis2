@@ -202,7 +202,7 @@ def generate_trajectories(config):
         if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1 and config.curr_iter > 0:
             # It's Human Teacher setting and there is at least one pretrained model.
             # Load latest trained model chechpoint instead of pretrained model, to resume interrupted training.
-            search_pattern = os.path.join(config.log_dir, 'train_model_*')
+            search_pattern = os.path.join(config.log_dir, 'train_models', 'train_model_*')
             matching_files = glob.glob(search_pattern)
             if not matching_files:
                 raise ValueError(f"Training model checkpoint not found for resuming training at iteration {config.curr_iter}. Expected at least one file matching: {search_pattern}")

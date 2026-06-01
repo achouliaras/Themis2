@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
-from moviepy import ImageClip, VideoFileClip, ColorClip, clips_array
+from moviepy import ImageClip, VideoFileClip, ColorClip, clips_array, concatenate_videoclips
 from PIL import Image, ImageDraw
 # 1. Silence imageio's internal logger
 import logging
@@ -115,6 +115,87 @@ def video_concat(pair, input_dir, output_dir):
     except Exception as e:
         return f"Error: {e}"
 
+def video_concat_extended(pair, input_dir, output_dir):
+    """
+    Side-by-side concatenation that plays:
+    1. Left video only (Right is black)
+    2. Right video only (Left is black)
+    3. Both videos simultaneously
+    """
+    name1, name2 = pair
+    output_filename = f"{name1}__{name2}.mp4"
+    output_path = os.path.join(output_dir, output_filename)
+
+    if os.path.exists(output_path):
+        return f"Skipped: {output_filename} exists."
+    try:
+        with VideoFileClip(os.path.join(input_dir, f"{name1}.mp4")) as c1, \
+             VideoFileClip(os.path.join(input_dir, f"{name2}.mp4")) as c2:
+            # --- Dimensions ---
+            spacer_width = c1.w // 10
+            text_height = 100  # Adjust this for taller/shorter text areas
+            d1 = c1.duration
+            d2 = c2.duration
+            d3 = max(d1, d2) # Duration for the final joint phase
+
+            # --- PHASE 1: Left Video Only (Right side is a black screen) ---
+            spacer_top_p1 = ColorClip(size=(spacer_width, c1.h), color=(0, 0, 0)).with_duration(d1)
+            black_right_p1 = ColorClip(size=(c2.w, c2.h), color=(0, 0, 0)).with_duration(d1)
+            
+            box_A_p1 = make_text_clip("A", c1.w, text_height, d1)
+            box_B_p1 = make_text_clip("B", c2.w, text_height, d1)
+            spacer_bottom_p1 = ColorClip(size=(spacer_width, text_height), color=(0, 0, 0)).with_duration(d1)
+
+            phase1 = clips_array([
+                [c1, spacer_top_p1, black_right_p1],
+                [box_A_p1, spacer_bottom_p1, box_B_p1]
+            ])
+
+            # --- PHASE 2: Right Video Only (Left side is a black screen) ---
+            black_left_p2 = ColorClip(size=(c1.w, c1.h), color=(0, 0, 0)).with_duration(d2)
+            spacer_top_p2 = ColorClip(size=(spacer_width, c2.h), color=(0, 0, 0)).with_duration(d2)
+            
+            box_A_p2 = make_text_clip("A", c1.w, text_height, d2)
+            box_B_p2 = make_text_clip("B", c2.w, text_height, d2)
+            spacer_bottom_p2 = ColorClip(size=(spacer_width, text_height), color=(0, 0, 0)).with_duration(d2)
+
+            phase2 = clips_array([
+                [black_left_p2, spacer_top_p2, c2],
+                [box_A_p2, spacer_bottom_p2, box_B_p2]
+            ])
+
+            # --- PHASE 3: Both Videos Together (Side-by-Side) ---
+            spacer_top_p3 = ColorClip(size=(spacer_width, c1.h), color=(0, 0, 0)).with_duration(d3)
+            
+            box_A_p3 = make_text_clip("A", c1.w, text_height, d3)
+            box_B_p3 = make_text_clip("B", c2.w, text_height, d3)
+            spacer_bottom_p3 = ColorClip(size=(spacer_width, text_height), color=(0, 0, 0)).with_duration(d3)
+
+            phase3 = clips_array([
+                [c1, spacer_top_p3, c2],
+                [box_A_p3, spacer_bottom_p3, box_B_p3]
+            ])
+            
+            # --- 1-Second Black Screen Gap ---
+            total_width = c1.w + spacer_width + c2.w
+            total_height = c1.h + text_height
+            black_gap = ColorClip(size=(total_width, total_height), color=(0, 0, 0)).with_duration(1.0)
+
+            # --- Final Assembly ---
+            # Stitch the three distinct phases back-to-back
+            final_clip = concatenate_videoclips([phase1, black_gap, phase2, black_gap, phase3])
+            final_clip.write_videofile(
+                output_path, 
+                codec="libx264", 
+                audio=False, 
+                logger=None,
+                bitrate="20k",                     # 1. Force an ultra-low bitrate limit
+                preset="veryslow",                  # 2. Spend more CPU time compressing
+            )
+        return f"Generated: {output_filename}"
+    except Exception as e:
+        return f"Error: {e}"
+    
 class VideoFramework:
     def __init__(self, config):
         if config.add_xai_videos:
@@ -189,8 +270,8 @@ class VideoFramework:
         # Initialize the video processor based on the chosen mode
         if self.video_processing_mode == VideoProcessingMode.SideBySide:
             self.video_processor = video_concat
-        elif self.video_processing_mode == VideoProcessingMode.TopBottom:
-            raise NotImplementedError("TopBottom video processing mode is not implemented yet.")
+        elif self.video_processing_mode == VideoProcessingMode.SideBySideExtended:
+            self.video_processor = video_concat_extended
         else:
             raise ValueError(f"Unsupported video processing mode: {self.video_processing_mode}")
 
@@ -236,10 +317,10 @@ class VideoFramework:
             print(f"Framework: All pairs processed in {end_time - start_time:.2f} seconds.")
             print(f"Framework: Average time per video pair: {(end_time - start_time) / len(pairs):.2f} seconds.")
             
-            # 5. Push videos to Label Studio
-            response = upload_new_batch(self.config.exp_group_name)
-            print(f"Uploaded {response['samples_uploaded']} new samples")
-            print(f"Skipped {response['samples_skipped']} pending or already labeled samples")
+            # # 5. Push videos to Label Studio
+            # response = upload_new_batch(self.config.exp_group_name)
+            # print(f"Uploaded {response['samples_uploaded']} new samples")
+            # print(f"Skipped {response['samples_skipped']} pending or already labeled samples")
             
             # # 6. Notify annotators about the new round
             # if self.config.notifications:

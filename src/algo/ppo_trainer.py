@@ -48,6 +48,7 @@ class PPOTrainer(PPORollout):
         int_rew_norm: int = 0,
         int_rew_coef: float = 1e-3,
         int_rew_momentum: float = 1,
+        int_rew_decay: bool = False,
         int_rew_eps: float = 0.0,
         adv_momentum: float = 0.0,
         image_noise_scale: float = 0.0,
@@ -61,6 +62,8 @@ class PPOTrainer(PPORollout):
         _init_setup_model: bool = True,
         ext_rew_coef: float = 1.0,
         ext_rew_pretrain_coef: float = 0.0,
+        rm_rew_coef: float = 0.0,
+        merge_rm_true_rew: bool = False,
         adv_norm: int = 1,
         adv_eps: float = 1e-8,
         env_source: Optional[str] = None,
@@ -87,6 +90,7 @@ class PPOTrainer(PPORollout):
             int_rew_coef=int_rew_coef,
             int_rew_norm=int_rew_norm,
             int_rew_momentum=int_rew_momentum,
+            int_rew_decay=int_rew_decay,
             int_rew_eps=int_rew_eps,
             int_rew_clip=int_rew_clip,
             adv_momentum=adv_momentum,
@@ -95,6 +99,8 @@ class PPOTrainer(PPORollout):
             can_see_walls=can_see_walls,
             ext_rew_coef=ext_rew_coef,
             ext_rew_pretrain_coef=ext_rew_pretrain_coef,
+            rm_rew_coef=rm_rew_coef,
+            merge_rm_true_rew=merge_rm_true_rew,
             adv_norm=adv_norm,
             adv_eps=adv_eps,
             max_grad_norm=max_grad_norm,
@@ -351,7 +357,4 @@ class PPOTrainer(PPORollout):
 
     def save(self, path: str) -> None:
         super(PPOTrainer, self).save(path, include=["run_id"])
-
-    # def load(self, load_path: str, device: th.device) -> None:
-    #     return super(PPOTrainer, self).load(load_path, device=device)
     

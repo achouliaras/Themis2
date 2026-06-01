@@ -152,7 +152,7 @@ class SamplingStrategy(Enum):
 
 class VideoProcessingMode(Enum):
     SideBySide = 0
-    TopBottom = 1
+    SideBySideExtended = 1
 
     @staticmethod
     def get_enum_video_processing_mode(mode):
@@ -162,8 +162,8 @@ class VideoProcessingMode(Enum):
             mode = mode.strip().lower()
             if mode == 'sidebyside':
                 return VideoProcessingMode.SideBySide
-            if mode == 'topbottom':
-                return VideoProcessingMode.TopBottom
+            if mode in ['sidebysideextended', 'sidebyside_extended', 'side_by_side_extended']:
+                return VideoProcessingMode.SideBySideExtended
         raise ValueError
     
 class XplainMethod(Enum):

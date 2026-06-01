@@ -24,7 +24,6 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
 
 
 class PPORollout(BaseAlgorithm):
-
     def __init__(
         self,
         policy: Union[str, Type[ActorCriticPolicy]],
@@ -43,6 +42,7 @@ class PPORollout(BaseAlgorithm):
         int_rew_coef: float,
         int_rew_norm : int,
         int_rew_momentum: Optional[float],
+        int_rew_decay: bool,
         int_rew_eps : float,
         int_rew_clip : float,
         adv_momentum : float,
@@ -51,6 +51,8 @@ class PPORollout(BaseAlgorithm):
         can_see_walls : int,
         ext_rew_coef: float,
         ext_rew_pretrain_coef: float,
+        rm_rew_coef: float,
+        merge_rm_true_rew: bool,
         adv_norm: int,
         adv_eps: float,
         max_grad_norm: float,
@@ -103,8 +105,11 @@ class PPORollout(BaseAlgorithm):
         self.enable_plotting = enable_plotting
         self.can_see_walls = can_see_walls
         self.int_rew_momentum = int_rew_momentum
+        self.int_rew_decay = int_rew_decay
         self.ext_rew_coef = ext_rew_coef
         self.ext_rew_pretrain_coef = ext_rew_pretrain_coef
+        self.rm_rew_coef = rm_rew_coef
+        self.merge_rm_true_rew = merge_rm_true_rew
         self.adv_norm = adv_norm
         self.adv_eps = adv_eps
         self.env_source = env_source
@@ -149,6 +154,7 @@ class PPORollout(BaseAlgorithm):
             int_rew_coef=self.int_rew_coef,
             ext_rew_coef=self.ext_rew_coef,
             ext_rew_pretrain_coef=self.ext_rew_pretrain_coef,
+            rm_rew_coef=self.rm_rew_coef,
             int_rew_norm=self.int_rew_norm,
             int_rew_clip=self.int_rew_clip,
             int_rew_eps=self.int_rew_eps,
@@ -157,6 +163,7 @@ class PPORollout(BaseAlgorithm):
             adv_eps=self.adv_eps,
             gru_layers=self.policy.gru_layers,
             int_rew_momentum=self.int_rew_momentum,
+            int_rew_decay=self.int_rew_decay,
             use_status_predictor=self.policy.use_status_predictor,
             curr_timesteps = self.num_timesteps,
             total_timesteps = self.total_timesteps
@@ -239,6 +246,7 @@ class PPORollout(BaseAlgorithm):
         self.rollout_done_episodes = 0
         self.rollout_done_episode_steps = 0
         self.rollout_sum_rewards = 0
+        self.rollout_sum_intrinsic_rewards = 0
         self.rollout_sum_true_rewards = 0
         self.rollout_episode_unique_states = 0
         self.rollout_done_episode_unique_states = 0
@@ -306,9 +314,9 @@ class PPORollout(BaseAlgorithm):
                 self.curr_target_dists = np.stack([key_dists, door_dists, goal_dists], axis=1)
 
 
-    def log_after_transition(self, true_rewards, rewards, intrinsic_rewards):
+    def log_after_transition(self, extrinsic_rewards, rewards, intrinsic_rewards):
         self.global_episode_rewards += rewards
-        self.global_episode_true_rewards += true_rewards
+        self.global_episode_true_rewards += extrinsic_rewards
         self.global_episode_intrinsic_rewards += intrinsic_rewards
         self.global_episode_steps += 1
 
@@ -385,6 +393,7 @@ class PPORollout(BaseAlgorithm):
                 self.episodic_trj_emb_history[env_id] = None
                 self.rollout_sum_rewards += self.global_episode_rewards[env_id]
                 self.rollout_sum_true_rewards += self.global_episode_true_rewards[env_id]
+                self.rollout_sum_intrinsic_rewards += self.global_episode_intrinsic_rewards[env_id]
                 self.rollout_done_episode_steps += self.global_episode_steps[env_id]
                 self.rollout_done_episode_unique_states += self.global_episode_unique_states[env_id]
                 self.rollout_done_episodes += 1
@@ -412,6 +421,7 @@ class PPORollout(BaseAlgorithm):
                 "time/total_timesteps": self.num_timesteps,
                 "rollout/ext_rew_coef": self.ppo_rollout_buffer.get_curr_ext_rew_coef(),
                 "rollout/ep_rew_mean": self.rollout_sum_rewards / (self.rollout_done_episodes + 1e-8),
+                "rollout/ep_int_rew_mean": self.rollout_sum_intrinsic_rewards / (self.rollout_done_episodes + 1e-8),
                 "rollout/ep_true_rew_mean": self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8),
                 "rollout/ep_len_mean": self.rollout_done_episode_steps / (self.rollout_done_episodes + 1e-8),
                 # unique states / positions
@@ -710,10 +720,15 @@ class PPORollout(BaseAlgorithm):
                 env.render()
 
             # If using reward model, modify the extrinsic rewards
-            true_rewards = rewards.copy()
+            extrinsic_rewards = rewards.copy()
             if reward_model is not None:
-                rewards = reward_model.r_hat(obs_tensor, clipped_actions,self._last_policy_mems)
-
+                
+                with th.no_grad():
+                    obs_tensor = obs_as_tensor(self._last_obs, self.device)
+                    clipped_actions_tensor = th.as_tensor(clipped_actions, dtype=th.int64, device=self.device)
+                    rewards = reward_model.policy.r_hat(obs_tensor, clipped_actions_tensor,self._last_policy_mems)
+                    rewards = rewards.cpu().numpy()
+            
             with th.no_grad():
                 # Compute value for the last timestep
                 new_obs_tensor = obs_as_tensor(new_obs, self.device)
@@ -724,7 +739,7 @@ class PPORollout(BaseAlgorithm):
                 self.create_intrinsic_rewards(new_obs, actions, dones)
 
             # Log after the transition and IR generation
-            self.log_after_transition(true_rewards, rewards, intrinsic_rewards)
+            self.log_after_transition(extrinsic_rewards, rewards, intrinsic_rewards)
 
             # Clear episodic memories when an episode ends
             self.clear_on_episode_end(dones, policy_mems, model_mems)
@@ -744,7 +759,7 @@ class PPORollout(BaseAlgorithm):
                 self._last_model_mems,
                 actions,
                 rewards,
-                true_rewards,
+                extrinsic_rewards,
                 intrinsic_rewards,
                 self._last_episode_starts,
                 dones,
@@ -761,7 +776,9 @@ class PPORollout(BaseAlgorithm):
             if model_mems is not None:
                 self._last_model_mems = model_mems.detach().clone()
 
-        ppo_rollout_buffer.compute_intrinsic_rewards()
+        if reward_model is not None:
+            ppo_rollout_buffer.compute_rm_rewards(include_true_rewards=self.merge_rm_true_rew)
+        ppo_rollout_buffer.compute_intrinsic_rewards(num_timesteps=self.num_timesteps, total_timesteps=self.total_timesteps+self.num_timesteps_completed)
         ppo_rollout_buffer.compute_returns_and_advantage(new_values, dones)
         callback.on_rollout_end()
         return True
@@ -802,6 +819,7 @@ class PPORollout(BaseAlgorithm):
                                             tb_log_name=tb_log_name
                                         )
         self.total_timesteps = total_timesteps
+        self.num_timesteps_completed = num_timesteps_completed
         if init:
             callback.on_training_start(locals(), globals())
             self.on_training_start()
@@ -839,12 +857,15 @@ class PPORollout(BaseAlgorithm):
 
             # Print to the console
             rew_mean = self.rollout_sum_rewards / (self.rollout_done_episodes + 1e-8)
+            int_rew_mean = self.rollout_sum_intrinsic_rewards / (self.rollout_done_episodes + 1e-8)
             true_rew_mean = self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8)
+            int_rew_str = f"0.0 ({int_rew_mean:.3f})" if self.int_rew_decay else f"{int_rew_mean:.6f}"
             print(f'--RL-- '
                   f'run: {self.run_id:2d}, '
                   f'iters: {self.iteration}, '
                   f'frames: {self.num_timesteps}, '
                   f'rew: {rew_mean:.6f}, '
+                  f'int_rew: {int_rew_str}, '
                   f'true_rew: {true_rew_mean:.6f}, '
                   f'rollout: {collect_end_time - collect_start_time:.3f} sec, '
                   f'train: {train_end_time - train_start_time:.3f} sec')

@@ -106,12 +106,10 @@ def train(config):
         ext_rew_coef=config.ext_rew_coef,
         ext_rew_pretrain_coef=config.ext_rew_pretrain_coef,
         rm_rew_coef=config.rm_rew_coef,
-        merge_rm_true_rew=config.merge_rm_true_rew,
         int_rew_source=config.int_rew_source,
         int_rew_coef=config.int_rew_coef,
         int_rew_norm=config.int_rew_norm,
         int_rew_momentum=config.int_rew_momentum,
-        int_rew_decay=config.int_rew_decay,
         int_rew_eps=config.int_rew_eps,
         int_rew_clip=config.int_rew_clip,
         adv_momentum=config.adv_momentum,
@@ -192,7 +190,6 @@ def train(config):
             
     model.train_mode()
     if config.reward_learning_frequency != 0:
-        
         rew_policy_kwargs = dict(
             activation_fn=activation_fn,
             optimizer_class=optimizer_class,
@@ -217,7 +214,7 @@ def train(config):
             run_id=config.run_id,
             reward_epochs = config.reward_epochs,
             reward_batch_size = config.reward_batch_size,
-            learning_rate = config.reward_learning_rate,
+            reward_learning_rate = config.reward_learning_rate,
             preference_buffer_capacity = config.preference_buffer_capacity,
             rl_policy = model.policy,
             int_rew_source=config.int_rew_source,
@@ -232,52 +229,26 @@ def train(config):
             local_logger=config.local_logger,
             sampling_strategy = config.sampling_strategy,
         )
-        kwargs_to_save = r_model_kwargs.copy()
-        if "env" in kwargs_to_save:
-            del kwargs_to_save["env"]
+        rm_kwargs_to_save = r_model_kwargs.copy()
+        if "env" in rm_kwargs_to_save:
+            del rm_kwargs_to_save["env"]
         with open(f"{config.log_dir}/r_model_kwargs.pkl", "wb") as file:
-            pickle.dump(kwargs_to_save, file)
+            pickle.dump(rm_kwargs_to_save, file)
             print("r_model_kwargs saved to r_model_kwargs.pkl")
 
-    # raise NotImplementedError("TESTING PHASE - IGNORE THIS EXCEPTION")
-    if config.reward_learning_frequency == 0:
-        # do not train reward model
-        print("Training with extrinsic + intrinsic rewards.")
-        model.learn(total_timesteps=train_steps, num_timesteps_completed=num_timesteps_completed, callback=callbacks)
-        num_timesteps_completed = model.num_timesteps
-        model.save(path=config.log_dir+f'/train_models/train_model_{num_timesteps_completed}')
-    elif config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1:        
-        rm_search_pattern = os.path.join(config.log_dir, 'reward_models', 'reward_model_*')
-        matching_files = glob.glob(rm_search_pattern)
-        latest_rm_path = max(matching_files, key=os.path.getmtime)
-        r_model = RewardModelTrainer.load(load_path=latest_rm_path, **r_model_kwargs)
-
-        # model.policy.soft_value_update(r_model.policy, tau=0.5) # Remember to disable action concat from ensemble model
-        train_for = config.train_for
-        print(f"Iter: {config.curr_iter}, Training for {train_for} steps total")
-        model.learn(total_timesteps=train_for, num_timesteps_completed=num_timesteps_completed, callback=callbacks, reward_model=r_model)
-        num_timesteps_completed = model.num_timesteps
-        model.save(path=config.log_dir+f'/train_models/train_model_{num_timesteps_completed}')
-    else:
         r_model = RewardModelTrainer(**r_model_kwargs)
-        if pretrain_steps == 0:
-            raise ValueError("Training a reward model requires pretrained agent.")
-        # Train reward model every <reward_learning_frequency> steps (FOR SYNTHETIC TEACHERS)
-        step = config.num_processes * config.n_steps
-        print(f"Training for {train_steps:_} steps total")
-        for i in range(0, train_steps, step):
-            if i%config.reward_learning_frequency == 0:
-                r_model.add_rl_policy_models(
-                    rl_policy=model.policy,
-                    use_model_rnn=config.use_model_rnn,
-                )
-                r_model.learn_from_synthetic(episode_num=config.episode_num, pair_num=config.pair_num, init = (i==0))
-            model.learn(total_timesteps=step, init = (i==0), reset_num_timesteps=(i==0), callback=callbacks, reward_model=r_model)
 
-        num_timesteps_completed = model.num_timesteps
+    if config.reward_learning_frequency >= config.total_steps or config.reward_learning_frequency == -1:
+        # Trains reward model only once at the beginning (FOR HUMAN PARTICIPANTS)
+        config.local_logger.truncate(target_value=num_timesteps_completed, prefix='rm')
+        preference_path = f"/home/achouliaras/crowdsourcing-platform/label-studio/data/{config.exp_group_name}"
+        r_model.init_encoder_from_rl_policy(model.policy)
+        r_model.policy.freeze_encoders()
+        r_model.learn_from_human(data_path=config.log_dir, preference_path=preference_path, curr_iter=config.curr_iter, timestep_log=num_timesteps_completed)
         r_model.save(path=config.log_dir+f'/reward_models/reward_model_step_{num_timesteps_completed}')
-        model.save(path=config.log_dir+f'/train_models/train_model_step_{num_timesteps_completed}')
-
+    else:
+        raise ValueError("Reward learning frequency settings not compatible for experiments with human feedback.")
+    
 @click.command()
 # Training params
 @click.option('--run_id', default=0, type=int, help='Index (and seed) of the current run')
@@ -324,7 +295,6 @@ def train(config):
 @click.option('--adv_momentum', default=0.9, type=float, help='EMA smoothing factor for advantage normalization')
 # Reward Model params
 @click.option('--reward_learning_frequency', default=int(0), type=int, help='Frequency of Reward Model updates per agent updates (0: no updates, -1: only once at the beginning, >=1: every X steps)')
-@click.option('--merge_rm_true_rew', default=True, type=bool, help='Whether to merge the reward model rewards with the true environment rewards when training the agent with a reward model (used for synthetic teachers)')
 @click.option('--episode_num', default=64, type=int, help='Number of episodes to be generated for Reward Model training')
 @click.option('--preference_buffer_capacity', default=int(1e4), type=int, help='Number of episodes that can be stored in the preference buffer')
 @click.option('--sampling_strategy', default='Uniform', type=str, help='Sampling strategy for generating preference pairs: [Uniform|SwissInfoGain]')
@@ -347,7 +317,6 @@ def train(config):
               help='Normalized IRs by: [0] No normalization [1] Standardization [2] Min-max normalization [3] Standardization w.o. subtracting the mean')
 @click.option('--int_rew_momentum', default=0.9, type=float,
               help='EMA smoothing factor for IR normalization (-1: total average)')
-@click.option('--int_rew_decay', default=False, type=bool, help='Whether to decay the contribution of intrinsic rewards over time (when using reward models)')
 @click.option('--int_rew_eps', default=1e-5, type=float, help='Epsilon for IR normalization')
 @click.option('--int_rew_clip', default=-1, type=float, help='Clip IRs into [-X, X] when X>0')
 @click.option('--aegis_nov_exp_mem_capacity', default=10000, type=int, help='Novel experience memory capacity (AEGIS)')
@@ -401,10 +370,10 @@ def main(
     num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, can_see_walls, fully_obs,
     image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, n_epochs, model_n_epochs,
     gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, adv_norm, adv_eps,
-    adv_momentum, reward_learning_frequency, merge_rm_true_rew, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter, train_for,
+    adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter, train_for,
     reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn,
-    ext_rew_coef, ext_rew_pretrain_coef, rm_rew_coef, int_rew_coef, int_rew_source, int_rew_norm, int_rew_momentum, int_rew_decay, 
-    int_rew_eps, int_rew_clip, aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum,
+    ext_rew_coef, ext_rew_pretrain_coef, rm_rew_coef, int_rew_coef, int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip,
+    aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum,
     dsc_obs_queue_len, icm_forward_loss_coef, ngu_knn_k, ngu_use_rnd, ngu_dst_momentum, rnd_use_policy_emb,
     rnd_err_norm, rnd_err_momentum, use_model_rnn, latents_dim, model_latents_dim, policy_cnn_type, policy_mlp_layers,
     policy_cnn_norm, policy_mlp_norm, policy_gru_norm, model_cnn_type, model_mlp_layers, model_cnn_norm, model_mlp_norm,

@@ -326,4 +326,9 @@ class PPOModel(ActorCriticCnnPolicy):
         values = self.value_net(latent_vf)
         return values, log_prob, distribution.entropy(), memories
     
-        
+    
+    def soft_value_update(self, source_net: nn.Module, tau: float = 0.05):
+        target_net = self.mlp_extractor.value_latent_nn
+        for source_model in source_net.ensemble_nn:
+            for target_param, source_param in zip(target_net.parameters(), source_model.parameters()):
+                target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data) 

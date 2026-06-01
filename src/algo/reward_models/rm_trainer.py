@@ -25,27 +25,27 @@ from stable_baselines3.common.utils import obs_as_tensor, safe_mean
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.callbacks import EvalCallback
 
-from typing import Any, Dict, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Tuple, Type, Union
 
 class RewardModelTrainer(BaseAlgorithm):
     def __init__(
         self,
         policy: Union[str, Type[MLPEnsemble]],
         env: Union[GymEnv, str],
-        run_id: int,
-        reward_epochs: int,
-        reward_batch_size: int,
-        reward_learning_rate: Union[float, Schedule],
-        preference_buffer_capacity: int,
-        rl_policy: ActorCriticPolicy,
-        int_rew_source: ModelType,
-        int_rew_coef: float,
-        int_rew_norm : int,
-        int_rew_momentum: Optional[float],
-        int_rew_eps : float,
-        int_rew_clip : float,
-        image_noise_scale : float,
-        can_see_walls : int,
+        run_id: int = 0,
+        reward_epochs: int = 100,
+        reward_batch_size: int = 32,
+        learning_rate: Union[float, Schedule] = 3e-4,
+        preference_buffer_capacity: int = int(1e4),
+        rl_policy: ActorCriticPolicy = None,
+        int_rew_source: ModelType = ModelType.NoModel,
+        int_rew_coef: float = 1e-2,
+        int_rew_norm : int = 1,
+        int_rew_momentum: Optional[float] = None,
+        int_rew_eps : float = 1e-5,
+        int_rew_clip : float = -1,
+        image_noise_scale : float = 0.0,
+        can_see_walls : int = 1,
         use_sde: bool = False,
         sde_sample_freq: int = -1,
         enable_plotting: int = 0,
@@ -66,8 +66,8 @@ class RewardModelTrainer(BaseAlgorithm):
         super(RewardModelTrainer, self).__init__(
             policy=policy,
             env=env,
-            learning_rate=reward_learning_rate,
-            policy_kwargs=None,
+            learning_rate=learning_rate,
+            policy_kwargs=policy_kwargs,
             verbose=verbose,
             device=device,
             use_sde=use_sde,
@@ -95,7 +95,6 @@ class RewardModelTrainer(BaseAlgorithm):
         self.local_logger = local_logger
         self.use_wandb = use_wandb
         self.enable_plotting = enable_plotting
-        self.policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
         self.sampling_strategy = sampling_strategy
         self.synthetic_teacher = synthetic_teacher
         
@@ -649,7 +648,6 @@ class RewardModelTrainer(BaseAlgorithm):
             # Count episodes
             n_episodes += dones.sum().item()
             
-            # self.verbose>0 and
             if verbose>0 and dones.sum().item() > 0:
                 print(f"Finished {dones.sum().item()} at step {self.num_timesteps/self.n_envs}")
 
@@ -851,7 +849,7 @@ class RewardModelTrainer(BaseAlgorithm):
         }
         pair_labels = preference_data['label'].map(label_mapping).fillna(-1.0).to_numpy(dtype=np.float32)
         pair_num = len(pair_indices)
-        val_ratio = 0.125 if pair_num > 100 else 0.25
+        val_ratio = 0.2 if pair_num > 100 else 0.1
         val_idx = np.sort(np.random.choice(pair_num, int(pair_num * val_ratio), replace=False))
         train_pairs_idx = np.setdiff1d(np.arange(pair_num), val_idx, assume_unique=True)
         
@@ -929,8 +927,7 @@ class RewardModelTrainer(BaseAlgorithm):
         self.val_buffer.free_space()
         self.preference_buffer.print_memory_footprint('Prefeference Buffer')
         self.val_buffer.print_memory_footprint('Validation Buffer  ')
-
-        self.verbose=1
+        
         # Train the reward model
         train_start_time = time.time()
         epochs_completed, best_val_loss = self.train(timestep_log=timestep_log)
@@ -950,12 +947,12 @@ class RewardModelTrainer(BaseAlgorithm):
               f'train: {train_end_time - train_start_time:.3f} sec')
         callback.on_training_end()
 
-    def add_rl_policy_models(self, rl_policy: ActorCriticPolicy, use_model_rnn: bool) -> None:
-        rl_policy.eval()
+    def add_rl_policy_models(self, rl_policy: ActorCriticPolicy) -> None:
         self.rl_policy = rl_policy
-        # self.policy.add_encoder_models(rl_policy.model_cnn_extractor, 
-        #                                    rl_policy.model_rnn_extractor, 
-        #                                    use_model_rnn)
+        self.rl_policy.eval()
+
+    def init_encoder_from_rl_policy(self, rl_policy: ActorCriticPolicy) -> None:
+        self.policy.init_encoder_from_rl_policy(rl_policy)
 
     def train(self, timestep_log: int) -> None:
         # Log training stats per each iteration
@@ -963,8 +960,12 @@ class RewardModelTrainer(BaseAlgorithm):
     
         best_val_loss = float('inf')
         epochs_no_improve = 0
-        patience = 5  # you can make this configurable
+        patience = 10  # you can make this configurable
         best_model_state = None
+
+        print(self.policy)
+        self.reward_epochs = 100
+        log_frequency = max(1, self.reward_epochs // 10)
 
         # Train Reward model
         for epoch in range(self.reward_epochs):
@@ -979,42 +980,73 @@ class RewardModelTrainer(BaseAlgorithm):
             for val_traj_data in self.val_buffer.get(self.reward_batch_size):  # separate validation buffer
                 val_loss, _, _ = self.policy.evaluate(val_traj_data)
                 val_losses.append(val_loss.item())
-
             avg_val_loss = sum(val_losses) / len(val_losses)
 
-            if self.verbose>0: 
-                print(f"[Epoch {epoch+1}/{self.reward_epochs}] Train loss: {avg_train_loss:.4f}, Val loss: {avg_val_loss:.4f}")
+            if self.verbose>0 and epoch % log_frequency == 0: 
+                print(f"[Epoch {epoch+1}/{self.reward_epochs}] Train loss: {avg_train_loss:.6f}, Val loss: {avg_val_loss:.6f}")
 
             # --- Early stopping check ---
-            if avg_val_loss < best_val_loss - 1e-5:  # small threshold to avoid noise
+            if avg_val_loss < best_val_loss:  # small threshold to avoid noise
                 best_val_loss = avg_val_loss
                 epochs_no_improve = 0
                 best_model_state = {
                     k: v.detach().clone().cpu() for k, v in self.policy.state_dict().items()
                 }
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    if self.verbose>0:
-                        print(f"   Early stopping triggered at epoch {epoch+1}. Best val loss: {best_val_loss:.4f}")
-                    if best_model_state is not None:
-                        self.policy.load_state_dict(best_model_state)
-                    break
+                print(f"   New best model found at epoch {epoch+1} with val loss: {best_val_loss:.6f}")
+            # else:
+            #     epochs_no_improve += 1
+            #     if epochs_no_improve >= patience:
+            #         if self.verbose>0:
+            #             print(f"   Early stopping triggered at epoch {epoch+1}. Best val loss: {best_val_loss:.6f}")
+            #         break
+        if best_model_state is not None:
+            self.policy.load_state_dict(best_model_state)
 
-            # --- Logging ---
-            log_data = {
-                "time/total_timesteps": timestep_log,
-                "time/epochs": epoch + 1,
-                "train/loss": avg_train_loss,
-                "val/loss": avg_val_loss,
-            }
-            # Update with other stats
-            log_data.update(self.training_stats.to_dict())
-            # Logging with wandb
-            if self.use_wandb:
-                wandb.log(log_data)
-            # Logging with local logger
-            if self.local_logger is not None:
-                self.local_logger.write(log_data, log_type='rm_train')
-            return epoch+1, best_val_loss
+        # --- Logging ---
+        log_data = {
+            "time/total_timesteps": timestep_log,
+            "time/epochs": epoch + 1,
+            "train/loss": avg_train_loss,
+            "val/loss": avg_val_loss,
+        }
+        # Update with other stats
+        log_data.update(self.training_stats.to_dict())
+        # Logging with wandb
+        if self.use_wandb:
+            wandb.log(log_data)
+        # Logging with local logger
+        if self.local_logger is not None:
+            self.local_logger.write(log_data, log_type='rm_train')
+        return epoch+1, best_val_loss
+        
+    def save(self, path: str, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None,) -> None:
+        include_list = list(include) if include is not None else []
+        include_list.extend([
+            "run_id",
+            "reward_epochs",
+            "reward_batch_size",
+            "reward_learning_rate",
+            "preference_buffer_capacity",
+            "episodic_obs_emb_history", 
+            "episodic_trj_emb_history", 
+            "_last_policy_mems", 
+            "_last_model_mems",
 
+        ])
+        super(RewardModelTrainer, self).save(path, include=include_list, exclude=exclude)
+
+    @classmethod
+    def load(cls, load_path: str, env=None, device="auto", custom_objects=None, **kwargs):
+        # Note: If you uncomment custom_objects to inject zeros, you will overwrite 
+        # the memories you just saved! Only use custom_objects if you are changing 
+        # self.n_envs between pretraining and training and need to reshape the arrays.
+        
+        # We let SB3's BaseAlgorithm load everything automatically
+        model = super().load(
+            path = load_path, 
+            env=env, 
+            device=device, 
+            custom_objects=custom_objects, 
+            **kwargs
+        )
+        return model

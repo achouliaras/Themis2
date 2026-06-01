@@ -29,18 +29,23 @@ class PPORolloutBuffer(BaseBuffer):
         int_rew_coef: float = 1.0,
         ext_rew_coef: float = 1.0,
         ext_rew_pretrain_coef: float = 0.0,
+        rm_rew_coef: float = 0.0,
         int_rew_norm: int = 0,
         int_rew_clip: float = 0.0,
         int_rew_eps: float = 1e-8,
+        rm_rew_norm: int = 0,
+        rm_rew_clip: float = 0.0,
+        rm_rew_eps: float = 1e-8,
         adv_momentum: float = 0.0,
         adv_norm: int = 0,
         adv_eps: float = 1e-8,
         gru_layers: int = 1,
         int_rew_momentum: Optional[float] = None,
+        int_rew_decay: bool = False,
         use_status_predictor: int = 0,
         curr_timesteps: int = 0,
         total_timesteps: int = 1e6,
-        _pretrain: bool = False,
+        _pretrain: bool = False
     ):
         if isinstance(observation_space, Dict):
             observation_space = list(observation_space.values())[0]
@@ -51,16 +56,22 @@ class PPORolloutBuffer(BaseBuffer):
         self.int_rew_coef = int_rew_coef
         self.int_rew_norm = int_rew_norm
         self.int_rew_clip = int_rew_clip
+        self.rm_rew_norm = rm_rew_norm
+        self.rm_rew_clip = rm_rew_clip
         self.ext_rew_coef = ext_rew_coef
         self.ext_rew_pretrain_coef = ext_rew_pretrain_coef
+        self.rm_rew_coef = rm_rew_coef
         self.features_dim = features_dim
         self.dim_policy_traj = dim_policy_traj
         self.dim_model_traj = dim_model_traj
         self.int_rew_eps = int_rew_eps
+        self.rm_rew_eps = rm_rew_eps if rm_rew_eps != 0 else int_rew_eps
         self.adv_momentum = adv_momentum
         self.adv_mean = None
         self.int_rew_mean = None
         self.int_rew_std = None
+        self.rm_rew_mean = None
+        self.rm_rew_std = None
         self.ir_mean_buffer = []
         self.ir_std_buffer = []
         self.use_status_predictor = use_status_predictor
@@ -68,13 +79,14 @@ class PPORolloutBuffer(BaseBuffer):
         self.adv_eps = adv_eps
         self.gru_layers = gru_layers
         self.int_rew_momentum = int_rew_momentum
+        self.int_rew_decay = int_rew_decay
         self.int_rew_stats = RunningMeanStd(momentum=self.int_rew_momentum)
+        self.rm_rew_stats = RunningMeanStd(momentum=self.int_rew_momentum)
         self.advantage_stats = RunningMeanStd(momentum=self.adv_momentum)
         
         self.curr_timesteps = curr_timesteps
         self.total_steps = total_timesteps
         self._pretrain = _pretrain
-
         self.generator_ready = False
         self.first_update = True
         self.reset()
@@ -163,7 +175,7 @@ class PPORolloutBuffer(BaseBuffer):
             self.pos = 0
         self.generator_ready = False
 
-    def compute_intrinsic_rewards(self) -> None:
+    def compute_intrinsic_rewards(self, num_timesteps=0, total_timesteps=0) -> None:
         # Normalize intrinsic rewards per rollout buffer
         self.int_rew_stats.update(self.intrinsic_rewards.reshape(-1))
         self.int_rew_mean = self.int_rew_stats.mean
@@ -177,11 +189,41 @@ class PPORolloutBuffer(BaseBuffer):
         )
 
         # Rescale by IR coef
-        self.intrinsic_rewards *= self.int_rew_coef
+        if self.int_rew_decay:            
+            # Calculate progress relative to the decay horizon
+            progress = num_timesteps / total_timesteps
+            progress = min(1.0, progress) # Stops decaying once it hits 0
+            current_coef = self.int_rew_coef * (1.0 - progress)
+            self.intrinsic_rewards *= current_coef # If we want to decay intrinsic rewards during training to allow rm to take over
+        else:
+            self.intrinsic_rewards *= self.int_rew_coef    
 
         # Clip after normalization
         if self.int_rew_clip > 0:
             self.intrinsic_rewards = np.clip(self.intrinsic_rewards, -self.int_rew_clip, self.int_rew_clip)
+
+    def compute_rm_rewards(self, include_true_rewards: bool = False) -> None:
+        # Normalize rm rewards per rollout buffer
+        self.rm_rew_stats.update(self.intrinsic_rewards.reshape(-1))
+        self.rm_rew_mean = self.rm_rew_stats.mean
+        self.rm_rew_std = self.rm_rew_stats.std
+        self.rewards = normalize_rewards(
+            norm_type=self.rm_rew_norm,
+            rewards=self.rewards,
+            mean=self.rm_rew_mean,
+            std=self.rm_rew_std,
+            eps=self.rm_rew_eps,
+        )
+
+        # Rescale by IR coef
+        self.rewards *= self.rm_rew_coef
+        
+        if include_true_rewards:
+            self.rewards += self.true_rewards
+
+        # Clip after normalization
+        if self.rm_rew_clip > 0:
+            self.rewards = np.clip(self.rewards, -self.rm_rew_clip, self.rm_rew_clip)
 
     def compute_returns_and_advantage(self, last_values: th.Tensor, dones: np.ndarray) -> None:
         # Rescale extrinsic rewards based on pretraining/training phase
