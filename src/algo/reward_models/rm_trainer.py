@@ -815,12 +815,17 @@ class RewardModelTrainer(BaseAlgorithm):
 
         # Load Episode data from data_input_path
         # Matches 'traj', then your run_id, then captures 3 digits, then '.npz'
-        pattern = re.compile(rf"^traj{self.run_id:02}(\d{{3}})\.npz$")
+        # run_id = self.run_id
+        run_id = 0
+        pattern = re.compile(rf"^traj{run_id:02}(\d{{3}})\.npz$")
+
+        # pattern = re.compile(rf"^traj{run_id:02}_(\d{{2}})_(\d{{2}})\.npz$")
+        
         # Extract all matching IDs into a set
         matched_files = sorted([f for f in os.listdir(data_input_path) if pattern.match(f)])
         existing_files = np.array(matched_files)
         episode_num = len(existing_files)
-                
+        
         for file_path in existing_files:
             with np.load(os.path.join(data_input_path, file_path)) as loaded:
                 data_dict = {key: loaded[key] for key in loaded.files}
@@ -839,8 +844,8 @@ class RewardModelTrainer(BaseAlgorithm):
         # Load preference data from preferences_input_path
         preference_data = pd.read_csv(preferences_input_path, usecols=['filename', 'label']) 
         names_series = preference_data['filename'].str.replace('.mp4', '', regex=False).str.split('_')
-        preference_data['left_traj_id'] = names_series.str[0].str.extract(rf"^traj{self.run_id:02}(\d{{3}})").astype(int)
-        preference_data['right_traj_id'] = names_series.str[1].str.extract(rf"^traj{self.run_id:02}(\d{{3}})").astype(int)
+        preference_data['left_traj_id'] = names_series.str[0].str.extract(rf"^traj{run_id:02}(\d{{3}})").astype(int)
+        preference_data['right_traj_id'] = names_series.str[1].str.extract(rf"^traj{run_id:02}(\d{{3}})").astype(int)
         pair_indices = preference_data[['left_traj_id', 'right_traj_id']].to_numpy()
         label_mapping = {
             'Left': 0.0,
@@ -887,7 +892,7 @@ class RewardModelTrainer(BaseAlgorithm):
             self.iteration = 0
         else:
             self.iteration = curr_iter
-        print('Using saved preference pair data ...')
+        print(f'Using saved preference pair data from {preference_path} and {data_path}')
         self.n_envs = 1
         self.preference_buffer.n_envs = 1
         self.synthetic_teacher = False
@@ -963,7 +968,7 @@ class RewardModelTrainer(BaseAlgorithm):
         patience = 10  # you can make this configurable
         best_model_state = None
 
-        print(self.policy)
+        # print(self.policy)
         self.reward_epochs = 100
         log_frequency = max(1, self.reward_epochs // 10)
 
@@ -999,24 +1004,23 @@ class RewardModelTrainer(BaseAlgorithm):
             #         if self.verbose>0:
             #             print(f"   Early stopping triggered at epoch {epoch+1}. Best val loss: {best_val_loss:.6f}")
             #         break
+            # --- Logging ---
+            log_data = {
+                "time/total_timesteps": timestep_log,
+                "time/epochs": epoch + 1,
+                "train/loss": avg_train_loss,
+                "val/loss": avg_val_loss,
+            }
+            # Update with other stats
+            log_data.update(self.training_stats.to_dict())
+            # Logging with wandb
+            if self.use_wandb:
+                wandb.log(log_data)
+            # Logging with local logger
+            if self.local_logger is not None:
+                self.local_logger.write(log_data, log_type='rm_train')
         if best_model_state is not None:
             self.policy.load_state_dict(best_model_state)
-
-        # --- Logging ---
-        log_data = {
-            "time/total_timesteps": timestep_log,
-            "time/epochs": epoch + 1,
-            "train/loss": avg_train_loss,
-            "val/loss": avg_val_loss,
-        }
-        # Update with other stats
-        log_data.update(self.training_stats.to_dict())
-        # Logging with wandb
-        if self.use_wandb:
-            wandb.log(log_data)
-        # Logging with local logger
-        if self.local_logger is not None:
-            self.local_logger.write(log_data, log_type='rm_train')
         return epoch+1, best_val_loss
         
     def save(self, path: str, include: Optional[Iterable[str]] = None, exclude: Optional[Iterable[str]] = None,) -> None:
@@ -1025,7 +1029,6 @@ class RewardModelTrainer(BaseAlgorithm):
             "run_id",
             "reward_epochs",
             "reward_batch_size",
-            "reward_learning_rate",
             "preference_buffer_capacity",
             "episodic_obs_emb_history", 
             "episodic_trj_emb_history", 

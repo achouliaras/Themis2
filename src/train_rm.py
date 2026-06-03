@@ -8,6 +8,7 @@ import warnings
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Suppress Pydantic v2 field attribute warnings from dependencies
 warnings.filterwarnings("ignore", message=".*attribute with value.*was provided to the.*Field.*function.*")
+warnings.filterwarnings("ignore", message=".*Overriding environment.*already in registry.*")
 
 from flask import config
 import torch as th
@@ -214,7 +215,7 @@ def train(config):
             run_id=config.run_id,
             reward_epochs = config.reward_epochs,
             reward_batch_size = config.reward_batch_size,
-            reward_learning_rate = config.reward_learning_rate,
+            learning_rate = config.reward_learning_rate,
             preference_buffer_capacity = config.preference_buffer_capacity,
             rl_policy = model.policy,
             int_rew_source=config.int_rew_source,
@@ -296,6 +297,7 @@ def train(config):
 # Reward Model params
 @click.option('--reward_learning_frequency', default=int(0), type=int, help='Frequency of Reward Model updates per agent updates (0: no updates, -1: only once at the beginning, >=1: every X steps)')
 @click.option('--episode_num', default=64, type=int, help='Number of episodes to be generated for Reward Model training')
+@click.option('--tries_per_episode', default=5, type=int, help='Number of times the agent tries to solve each episode')
 @click.option('--preference_buffer_capacity', default=int(1e4), type=int, help='Number of episodes that can be stored in the preference buffer')
 @click.option('--sampling_strategy', default='Uniform', type=str, help='Sampling strategy for generating preference pairs: [Uniform|SwissInfoGain]')
 @click.option('--pair_num', default=128, type=int, help='Number of preference pairs to be generated for Reward Model training (used for relevant strategies)')
@@ -370,7 +372,7 @@ def main(
     num_processes, batch_size, n_steps, env_source, game_name, project_name, map_size, can_see_walls, fully_obs,
     image_noise_scale, procgen_mode, procgen_num_threads, log_explored_states, fixed_seed, n_epochs, model_n_epochs,
     gamma, gae_lambda, pg_coef, vf_coef, ent_coef, max_grad_norm, clip_range, clip_range_vf, adv_norm, adv_eps,
-    adv_momentum, reward_learning_frequency, episode_num, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter, train_for,
+    adv_momentum, reward_learning_frequency, episode_num, tries_per_episode, preference_buffer_capacity, sampling_strategy, pair_num, curr_iter, train_for,
     reward_epochs, reward_batch_size, reward_learning_rate, reward_ensemble_size, reward_activation_fn,
     ext_rew_coef, ext_rew_pretrain_coef, rm_rew_coef, int_rew_coef, int_rew_source, int_rew_norm, int_rew_momentum, int_rew_eps, int_rew_clip,
     aegis_nov_exp_mem_capacity, aegis_knn_k, aegis_dst_momentum,

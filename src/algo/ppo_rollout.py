@@ -859,13 +859,13 @@ class PPORollout(BaseAlgorithm):
             rew_mean = self.rollout_sum_rewards / (self.rollout_done_episodes + 1e-8)
             int_rew_mean = self.rollout_sum_intrinsic_rewards / (self.rollout_done_episodes + 1e-8)
             true_rew_mean = self.rollout_sum_true_rewards / (self.rollout_done_episodes + 1e-8)
-            int_rew_str = f"0.0 ({int_rew_mean:.3f})" if self.int_rew_decay else f"{int_rew_mean:.6f}"
+            # int_rew_str = f"0.0 ({int_rew_mean:.3f})" if self.int_rew_decay else f"{int_rew_mean:.6f}"
             print(f'--RL-- '
                   f'run: {self.run_id:2d}, '
                   f'iters: {self.iteration}, '
                   f'frames: {self.num_timesteps}, '
                   f'rew: {rew_mean:.6f}, '
-                  f'int_rew: {int_rew_str}, '
+                  f'int_rew: {int_rew_mean:.6f}, '
                   f'true_rew: {true_rew_mean:.6f}, '
                   f'rollout: {collect_end_time - collect_start_time:.3f} sec, '
                   f'train: {train_end_time - train_start_time:.3f} sec')

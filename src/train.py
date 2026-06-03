@@ -8,6 +8,7 @@ import warnings
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Suppress Pydantic v2 field attribute warnings from dependencies
 warnings.filterwarnings("ignore", message=".*attribute with value.*was provided to the.*Field.*function.*")
+warnings.filterwarnings("ignore", message=".*Overriding environment.*already in registry.*")
 
 from flask import config
 import torch as th
